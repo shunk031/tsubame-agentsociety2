@@ -15,6 +15,7 @@ Reads RUN_DIR and MIN_REPLAY_RECORDS from the environment.
 from __future__ import annotations
 
 import collections
+import json
 import os
 import sys
 from pathlib import Path
@@ -59,6 +60,54 @@ def main() -> int:
         )
         return 1
 
+    return _report_interaction(replay_dir)
+
+
+def _report_interaction(replay_dir: Path) -> int:
+    """Check that agents actually acted on each other, not merely that rows exist.
+
+    A run can fill core_agent_profile, log a tidy sequence of observations and
+    still be inert: every agent looked around and nobody did anything. Counting
+    rows does not catch that, because the profile rows are written at startup.
+    The environment state is where a decision leaves a trace.
+    """
+    states = []
+    for shard in sorted(replay_dir.glob("*_env_state.*.jsonl")) or sorted(
+        replay_dir.glob("*env_state*.jsonl")
+    ):
+        with shard.open(encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if line:
+                    states.append(json.loads(line))
+
+    if not states:
+        print("no environment state was recorded", file=sys.stderr)
+        return 1
+
+    states.sort(key=lambda row: row.get("step", 0))
+
+    # Field names differ per environment; report whichever are present rather
+    # than hardcoding one environment's schema.
+    interesting = ("round_number", "current_pool_resources", "total_messages_sent")
+    print()
+    for row in states:
+        shown = {k: row[k] for k in interesting if k in row}
+        print(f"step {row.get('step')}: {shown}")
+
+    rounds = max((row.get("round_number", 0) for row in states), default=0)
+    messages = max((row.get("total_messages_sent", 0) for row in states), default=0)
+
+    if rounds == 0 and messages == 0:
+        print(
+            "\nFAIL the simulation completed but no agent acted: no rounds were "
+            "resolved and no messages were sent. The plumbing works; the "
+            "scenario did not get the agents to do anything.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"\ninteraction confirmed: {rounds} rounds, {messages} messages")
     return 0
 
 
