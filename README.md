@@ -103,7 +103,7 @@ scripts/watch.sh                     # 走っているジョブに合流
 
 ```bash
 scripts/submit.sh jobs/run_sim.sh -l node_f=1 -l h_rt=3:00:00 \
-  -v MODEL=Qwen/Qwen3.6-35B-A3B-FP8,NUM_AGENTS=64,NUM_STEPS=4
+  -v MODEL=Qwen/Qwen3.6-35B-A3B-FP8,NUM_AGENTS=16,NUM_ROUNDS=10
 ```
 
 ## パラメータ
@@ -113,9 +113,10 @@ scripts/submit.sh jobs/run_sim.sh -l node_f=1 -l h_rt=3:00:00 \
 | 変数 | 既定値 | 意味 |
 |---|---|---|
 | `MODEL` | `Qwen/Qwen3.5-4B` | vLLM で提供するモデル |
-| `NUM_AGENTS` | `8` | エージェント数 |
-| `NUM_STEPS` | `2` | 実行ステップ数 |
-| `TICK_SECONDS` | `3600` | 1 ステップの模擬秒数 |
+| `ENV_MODULE` | `CommonsTragedyEnv` | シナリオの環境モジュール |
+| `NUM_AGENTS` | `0` | `0` は環境ごとの既定に従う |
+| `NUM_ROUNDS` | `4` | 1 ラウンド = intervene + run + questionnaire |
+| `TICK_SECONDS` | `900` | 1 run ステップの模擬秒数 |
 | `ENABLE_THINKING` | `1` | エージェントに推論させる。`0` でスループット優先 |
 | `MAX_MODEL_LEN` | `65536` | vLLM のコンテキスト長 |
 
