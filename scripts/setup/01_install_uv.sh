@@ -12,8 +12,7 @@
 #   perfectly able to install uv, since uv ships as a self-contained binary.
 #
 #   @example
-#     ssh "${TSUBAME_USER}@${TSUBAME_LOGIN_HOST}" \
-#       bash ~/tsubame-agentsociety2/scripts/setup/01_install_uv.sh
+#     scripts/ssh.sh 'bash "$REMOTE_REPO"/scripts/setup/01_install_uv.sh'
 
 set -euo pipefail
 

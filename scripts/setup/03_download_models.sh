@@ -1,23 +1,21 @@
 #!/usr/bin/env bash
 
-# @file scripts/setup/05_download_models.sh
+# @file scripts/setup/03_download_models.sh
 # @brief Pre-fetch model weights into the shared HuggingFace cache.
 # @description
 #   Run on the login node, which has direct outbound network access. Downloading
-#   inside a job would burn reserved GPU time on network transfer, and a
-#   `node_f` job holds four H100s while it waits.
+#   inside a job would spend GPU time on network transfer, and a node_f job
+#   holds four H100s while it waits.
 #
 #   Downloads MODEL unless overridden. Already-cached files are skipped, so
 #   re-running is cheap.
 #
 #   @example
-#     ssh "${TSUBAME_USER}@${TSUBAME_LOGIN_HOST}" \
-#       bash ~/tsubame-agentsociety2/scripts/setup/05_download_models.sh
+#     scripts/ssh.sh 'bash "$REMOTE_REPO"/scripts/setup/03_download_models.sh'
 #
 #   @example
-#     ssh "${TSUBAME_USER}@${TSUBAME_LOGIN_HOST}" \
-#       MODEL=Qwen/Qwen3.6-35B-A3B-FP8 \
-#       bash ~/tsubame-agentsociety2/scripts/setup/05_download_models.sh
+#     scripts/ssh.sh 'MODEL=Qwen/Qwen3.6-35B-A3B-FP8 \
+#       bash "$REMOTE_REPO"/scripts/setup/03_download_models.sh'
 
 set -euo pipefail
 

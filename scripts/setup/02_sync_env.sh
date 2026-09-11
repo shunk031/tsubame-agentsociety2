@@ -13,8 +13,7 @@
 #   else. UV_PROJECT_ENVIRONMENT is what moves it there.
 #
 #   @example
-#     ssh "${TSUBAME_USER}@${TSUBAME_LOGIN_HOST}" \
-#       bash ~/tsubame-agentsociety2/scripts/setup/02_sync_env.sh
+#     scripts/ssh.sh 'bash "$REMOTE_REPO"/scripts/setup/02_sync_env.sh'
 
 set -euo pipefail
 
