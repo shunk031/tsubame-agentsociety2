@@ -132,23 +132,23 @@ scripts/submit.sh jobs/run_sim.sh -l node_f=1 -l h_rt=3:00:00 \
 
 ## 動作確認
 
-`Qwen/Qwen3.5-4B` + `gpu_1` で通したときの実測。
+`Qwen/Qwen3.5-4B` + `gpu_1` + 8 エージェント / 2 ステップ での実測。
 
 | 段階 | 結果 |
 |---|---|
 | `jobs/smoke.sh` | exit 0 / `POST /v1/chat/completions` が 200 |
-| `jobs/run_sim.sh` | exit 0 / replay に 10 レコード |
+| `jobs/run_sim.sh` | exit 0 / 568 秒 / replay に 10 レコード |
 
 ```
 core_agent_profile       8 records
 simple_social_env_state  2 records
 ```
 
-- 8 エージェントの `<observe>` 1 回あたり 2〜15 秒
-- vLLM 起動は 265 秒（FlashInfer キャッシュが温まった 2 回目）
+- エージェント 1 回の応答は 3〜37 秒（thinking 有効）
+- LLM 呼び出しの失敗・リトライは 0 件
 - 完了判定は exit code だけを見ない
   - agentsociety2 は LLM 呼び出しの失敗を握り潰す経路がある
-  - 例: embedding 呼び出しの失敗は warning に落ちてキャッシュミス扱いで続行
+  - 例: embedding 未設定時は warning に落ちてキャッシュミス扱いで続行
   - ➜ `scripts/check_replay.py` が replay のレコード数まで確認する
 
 ## TSUBAME で踏んだ落とし穴
