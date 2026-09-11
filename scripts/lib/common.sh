@@ -99,9 +99,21 @@ export AGENTSOCIETY_LLM_MODEL="${AGENTSOCIETY_LLM_MODEL:-${MODEL}}"
 export MEM0_TELEMETRY="${MEM0_TELEMETRY:-False}"
 export ANONYMIZED_TELEMETRY="${ANONYMIZED_TELEMETRY:-False}"
 
-NUM_AGENTS="${NUM_AGENTS:-8}"
-NUM_STEPS="${NUM_STEPS:-2}"
-TICK_SECONDS="${TICK_SECONDS:-3600}"
+# The environment decides the shape of the scenario. CommonsTragedyEnv gives
+# agents a depletable shared pool to draw from, so their choices interact:
+# what one takes changes what is left for the others.
+ENV_MODULE="${ENV_MODULE:-CommonsTragedyEnv}"
+
+# Empty means "whatever the environment expects".
+NUM_AGENTS="${NUM_AGENTS:-0}"
+
+# One round is a run step followed by a questionnaire. The questionnaire is
+# where the data comes from; a run on its own records almost nothing.
+NUM_ROUNDS="${NUM_ROUNDS:-4}"
+TICK_SECONDS="${TICK_SECONDS:-900}"
+
+POOL_RESOURCES="${POOL_RESOURCES:-100}"
+MAX_EXTRACTION="${MAX_EXTRACTION:-10}"
 
 # Replay records required before a run counts as successful.
 MIN_REPLAY_RECORDS="${MIN_REPLAY_RECORDS:-1}"

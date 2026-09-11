@@ -17,7 +17,7 @@
 #
 #   @example
 #     scripts/submit.sh jobs/run_sim.sh -l node_f=1 -l h_rt=3:00:00 \
-#       -v MODEL=Qwen/Qwen3.6-35B-A3B-FP8,NUM_AGENTS=64,NUM_STEPS=4
+#       -v MODEL=Qwen/Qwen3.6-35B-A3B-FP8,NUM_AGENTS=16,NUM_ROUNDS=10
 
 #$ -cwd
 #$ -V
@@ -41,7 +41,8 @@ log "host    $(hostname)"
 log "job     ${JOB_ID:-<interactive>}"
 log "run dir ${RUN_DIR}"
 log "model   ${MODEL}"
-log "agents  ${NUM_AGENTS} over ${NUM_STEPS} steps of ${TICK_SECONDS}s"
+log "env     ${ENV_MODULE}"
+log "agents  ${NUM_AGENTS:-<env default>} over ${NUM_ROUNDS} rounds of ${TICK_SECONDS}s"
 
 GPU_COUNT="$(detect_gpu_count)"
 [[ "${GPU_COUNT}" -gt 0 ]] || die "no GPU visible; submit with a GPU resource type"
@@ -72,9 +73,12 @@ ENDPOINT="http://${VLLM_HOST}:${VLLM_PORT}" \
 log "generating the configuration"
 "${VENV}/bin/python" "${REPO_ROOT}/scripts/gen_config.py" \
     --out-dir "${RUN_DIR}" \
+    --env-module "${ENV_MODULE}" \
     --num-agents "${NUM_AGENTS}" \
-    --num-steps "${NUM_STEPS}" \
-    --tick "${TICK_SECONDS}"
+    --num-rounds "${NUM_ROUNDS}" \
+    --tick "${TICK_SECONDS}" \
+    --pool-resources "${POOL_RESOURCES}" \
+    --max-extraction "${MAX_EXTRACTION}"
 
 # `python -m`, not the `agentsociety` console script: agentsociety 1.x defines a
 # console script by that same name, so the module path is unambiguous.
