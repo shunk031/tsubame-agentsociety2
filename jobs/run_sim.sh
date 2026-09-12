@@ -92,6 +92,7 @@ log "running the simulation"
 
 log "checking that the run produced data"
 RUN_DIR="${RUN_DIR}" MIN_REPLAY_RECORDS="${MIN_REPLAY_RECORDS}" \
+MIN_PARTICIPATION="${MIN_PARTICIPATION}" \
     "${VENV}/bin/python" "${REPO_ROOT}/scripts/check_replay.py"
 
 log "simulation complete: ${RUN_DIR}"

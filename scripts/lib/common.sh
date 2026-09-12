@@ -108,7 +108,8 @@ ENV_MODULE="${ENV_MODULE:-CommonsTragedyEnv}"
 NUM_AGENTS="${NUM_AGENTS:-0}"
 
 # One round is a run step followed by a questionnaire. The questionnaire is
-# where the data comes from; a run on its own records almost nothing.
+# where the data comes from; a run on its own records almost nothing. There is
+# no ask or intervene step — see the docstring on gen_config.build_steps.
 NUM_ROUNDS="${NUM_ROUNDS:-4}"
 TICK_SECONDS="${TICK_SECONDS:-900}"
 
@@ -117,6 +118,11 @@ MAX_EXTRACTION="${MAX_EXTRACTION:-10}"
 
 # Replay records required before a run counts as successful.
 MIN_REPLAY_RECORDS="${MIN_REPLAY_RECORDS:-1}"
+
+# Fraction of agents that must act per round. A round resolves as soon as one
+# agent submits, so "every round resolved" can still mean one agent playing and
+# the rest looking on — a different simulation from the one being described.
+MIN_PARTICIPATION="${MIN_PARTICIPATION:-0.5}"
 
 # Seconds to wait for vLLM to report healthy.
 VLLM_STARTUP_TIMEOUT="${VLLM_STARTUP_TIMEOUT:-1800}"

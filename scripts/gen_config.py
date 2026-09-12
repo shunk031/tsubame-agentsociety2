@@ -5,11 +5,14 @@ AgentSociety 2 has no bulk agent count in its schema the way v1 did: ``agents``
 is a list and every participant is spelled out. Anything beyond a toy run is
 therefore expected to be generated, which is what this script does.
 
-The step layout follows the only upstream example that still runs, the
-``daily_mobility`` one: alternate a short ``run`` with a ``questionnaire``
-rather than running a long stretch and hoping something was recorded. The
-questionnaire is the measurement instrument; without one a run produces agent
-profiles and little else.
+The steps alternate a short ``run`` with a ``questionnaire``, following the only
+upstream example that still runs, the ``daily_mobility`` one. The questionnaire
+is the measurement instrument; without one a run produces agent profiles and
+little else.
+
+There are no ``ask`` or ``intervene`` steps, and that is deliberate — see
+``build_steps``. Everything the agents need is in their profile, which is why
+``role`` below carries the rules and the procedure rather than a description.
 
 Schema constraints worth knowing, all enforced by the pydantic models in
 ``agentsociety2.society.models``:
@@ -40,72 +43,92 @@ PERSONALITIES = [
 ]
 
 # Each entry describes one environment: the kwargs it is constructed with, how
-# many agents it expects, and the briefing the agents are given up front. The
-# briefing matters more than it looks — agents that are not told the rules have
-# nothing to act on, and the run degenerates into observation with no decisions.
+# many agents it expects, and the standing orders its agents are given.
+#
+# `role` does the work that a briefing or a per-round instruction would do
+# elsewhere. During a `run` step there is no <question>, so nothing external
+# reaches the agent — the prompt is built from the profile, the automatic
+# observation and memory, and the profile is the only part this script controls.
+# It therefore has to carry the rules of the game and the action to take, not a
+# description of the situation.
+#
+# The wording of the action follows the contract in ask_env's own tool schema:
+# "write `instruction` as a reusable template with stable wording, and put
+# changing runtime values in `variables` instead of embedding them directly in
+# the text". The code-generating router is told the same thing from the other
+# side — it is instructed to read changing values from ctx['variables'] rather
+# than hard-code literals — so the instruction has to name the keys it expects.
+#
+# Writing the amount into the sentence instead works, but only by accident: it
+# is a different instruction every round, so the template cache can never match
+# it, and it puts the one value that must survive into the part of the call the
+# router has to parse out of prose. Upstream's own CommonsTragedyAgent passes
+# agent_name and requested_extraction through ctx['variables']; this is the same
+# call, made from a ReAct loop instead of from Python.
+#
+# The environment tool is deliberately not named. An instruction that says
+# "call submit_extraction" makes the agent attempt it as a ReAct action and
+# fail with "Unknown tool" — cause 3 in PR #1.
+#
+# Nor is any forbidden form exhibited. An earlier version of this text listed
+# the placeholders not to write, and the model copied one of them out of the
+# prohibition into a live request. Say what to send, not what to avoid.
+#
+# Formatted with `n` (the number of *other* agents), `pool` and `max_extract`.
 ENVIRONMENTS = {
     "CommonsTragedyEnv": {
         "default_agents": 4,
         "role": (
-            "You are a participant in a shared-resource experiment. Your only "
-            "activity is deciding how much to extract from a common pool each "
-            "round; you have no job, home or errands to attend to."
+            "You are a participant in a shared-resource experiment, and it is "
+            "the only thing you do: no job, no home, no errands. You share a "
+            "common pool of {pool} resource units with {n} others. Each round "
+            "you may take between 1 and {max_extract} units, every unit you "
+            "take is worth one point to you, and the pool never refills. If "
+            "everyone's requests together exceed what is left, the remainder "
+            "is split in proportion to what each of you asked for. So on every "
+            "step, before anything else: choose a whole number between 1 and "
+            "{max_extract}, then use ask_env exactly once. Send this "
+            "instruction word for word, the same every round: \"submit an "
+            "extraction from the shared pool using agent_name and "
+            "requested_extraction from ctx['variables']\". Your two values go "
+            "in the ask_env variables argument, not into that sentence: "
+            "agent_name is your own name, copied exactly as it appears in your "
+            "profile, and requested_extraction is the whole number you chose."
         ),
         "env_kwargs": lambda n, args: {
             "num_agents": n,
             "initial_pool_resources": args.pool_resources,
             "max_extraction_per_agent": args.max_extraction,
         },
-        "briefing": (
-            "You share a common pool of {pool} resource units with {n} others. "
-            "Each round you may extract between 1 and {max_extract} units, and "
-            "each unit you take is worth one point to you. The pool does not "
-            "refill. If everyone's requests together exceed what is left, the "
-            "remainder is split in proportion to what each of you asked for. "
-            "Each round you decide your own amount and tell the environment "
-            "through ask_env, then say briefly why you chose that amount."
-        ),
-        # Delivered before every run step. The opening briefing alone does not
-        # survive: left to themselves the agents invent unrelated daily lives
-        # and never touch the pool, so the instruction is repeated each round.
-        #
-        # It asks for the action in plain words rather than naming the tool.
-        # Agents reach the environment through ask_env, which generates the call
-        # for them; an instruction to "call submit_extraction" makes the agent
-        # try it as a ReAct action and fail with "Unknown tool".
-        # The amount has to survive into the generated call. Phrasing the example
-        # with a placeholder does not work: the agent repeats the placeholder,
-        # the environment cannot read it as an integer, and it clamps the request
-        # to 1 — which is why every extraction came back as exactly 1 unit.
-        "instruction": (
-            "It is now round {round}. First pick a whole number between 1 and "
-            "{max_extract}: how many units you want from the shared pool. Then "
-            "use ask_env once, writing that number out in the request, for "
-            "example 'submit an extraction of 7 units for me' if you chose 7. "
-            "Write the number itself, never a placeholder letter. Do this "
-            "before anything else."
-        ),
+        # Answering 0 has to be allowed. An agent that took nothing otherwise
+        # has no answer to give, and tries to extract during the questionnaire
+        # instead — which is read-only, so it fails with "ask_env mutation is
+        # disabled in readonly mode". Observed for two agents in the last run.
         "question": (
-            "In round {round} of the shared-resource game, how many units did you "
-            "request from the pool? Answer with the number only."
+            "In round {round} of the shared-resource game, how many units did "
+            "you request from the pool? Answer with the number only, and "
+            "answer 0 if you did not request any."
         ),
         "response_type": "integer",
     },
     "SimpleSocialSpace": {
         "default_agents": 8,
         "role": (
-            "You are a participant in a group conversation experiment. Your only "
-            "activity is talking with the others."
+            "You are a participant in a group conversation experiment, and it "
+            "is the only thing you do. You are in a group with {n} others. On "
+            "every step, before anything else: use ask_env exactly once. Send "
+            "this instruction word for word, the same every step: \"send a "
+            "message using sender_id, receiver_id and content from "
+            "ctx['variables']\". Your three values go in the ask_env variables "
+            "argument, not into that sentence: sender_id is your own id, "
+            "receiver_id is the id of the person you are writing to, and "
+            "content is what you want to say to them."
         ),
         "env_kwargs": lambda n, args: {},
-        "briefing": (
-            "You are in a group with {n} other people. Introduce yourself and "
-            "talk to them."
+        "question": (
+            "How many messages have you sent so far? Answer with the number "
+            "only, and answer 0 if you have sent none."
         ),
-        "instruction": (
-            "Send a message to at least one other person in the group now."
-        ),
-        "question": "How many messages have you sent so far? Answer with the number only.",
         "response_type": "integer",
     },
 }
@@ -116,7 +139,8 @@ def build_agents(num_agents: int, seed: int, role: str) -> list[dict]:
 
     Names follow ``Agent-{id}``. That is not cosmetic: the environment tools
     take an ``agent_name`` argument and their docstrings specify this format, so
-    an agent that calls itself "Alice" writes into a key nothing else reads.
+    an agent that calls itself "Alice" — or "Agent 3" — writes into a key
+    nothing else reads.
 
     The role is prepended to each personality because a bare trait leaves the
     agent unanchored: given only "competitive and opportunistic" it will invent
@@ -134,7 +158,9 @@ def build_agents(num_agents: int, seed: int, role: str) -> list[dict]:
                 "name": f"Agent-{index + 1}",
                 "age": rng.randint(20, 65),
                 "personality": f"{role} Your disposition: {rng.choice(PERSONALITIES)}.",
-                "max_react_turns": 8,
+                # A ReAct turn spent on a failed call must not exhaust the
+                # budget before the agent reaches ask_env.
+                "max_react_turns": 12,
             },
         }
         for index in range(num_agents)
@@ -157,24 +183,42 @@ def build_init_config(agents: list[dict], env_module: str, env_kwargs: dict) -> 
 
 
 def build_steps(args, spec: dict, num_agents: int) -> dict:
-    """Alternate a short run with a questionnaire, once per round."""
+    """One round is one ``run`` step followed by the questionnaire measuring it.
+
+    There is deliberately no ``ask`` and no ``intervene`` step, though both look
+    like the natural way to brief agents and to nudge them each round. Neither
+    is delivered to the agents. ``AskStep`` and ``InterveneStep`` carry no
+    recipient list — only ``QuestionnaireStep`` has ``target_agent_ids`` — so
+    the CLI hands their text to ``AgentSocietyHelper``, a plan-and-execute loop
+    running on the same model the agents do, and lets it decide what to do with
+    it. Three things follow, all of them seen in the logs of the run that
+    prompted this:
+
+    - It rarely chose ``ask_agents``, the only tool that reaches an agent, and
+      it has no way of knowing how many agents exist. Nothing arrived.
+    - It submitted extractions itself through ``ask_environment``, inventing an
+      ``agent_name`` as it went. Rounds 1 and 2 recorded an extraction for
+      Agent-1 that Agent-1 never made: a fifth participant, which is worse than
+      a missing one.
+    - Its own planning prompt taught it to fail. It fabricated a ``think`` tool
+      and copied the ``{"param1": "value1"}`` example out of that prompt into a
+      call that takes no arguments.
+
+    A ``run`` step has none of these properties: ``AgentSociety.step`` fans every
+    agent id out to ``step_agent_batch`` with no filtering, the environment's
+    observe-kind tools are called automatically so each agent already sees the
+    pool, and the ReAct loop runs with mutation allowed. Participation becomes
+    N independent agent loops instead of one planner's guess.
+
+    (An intervene would not have survived to the run step in any case. The
+    instruction is delivered through ``agent.ask``, which never calls
+    ``memory_runtime.after_step`` — only ``step`` does — so nothing the agent
+    decided there is still in context when the round is resolved.)
+    """
     agent_ids = list(range(1, num_agents + 1))
-
-    briefing = spec["briefing"].format(
-        n=num_agents - 1, pool=args.pool_resources, max_extract=args.max_extraction
-    )
-
-    steps: list[dict] = [{"type": "ask", "question": briefing}]
+    steps: list[dict] = []
 
     for round_number in range(1, args.num_rounds + 1):
-        steps.append(
-            {
-                "type": "intervene",
-                "instruction": spec["instruction"].format(
-                    round=round_number, max_extract=args.max_extraction
-                ),
-            }
-        )
         steps.append({"type": "run", "num_steps": 1, "tick": args.tick})
         steps.append(
             {
@@ -196,7 +240,7 @@ def build_steps(args, spec: dict, num_agents: int) -> dict:
     return {"start_t": args.start_t, "steps": steps}
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", type=Path, required=True,
                         help="Directory to write init_config.json and steps.yaml into")
@@ -212,19 +256,34 @@ def main() -> None:
     parser.add_argument("--max-extraction", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--start-t", default="2026-01-01T09:00:00")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    spec = ENVIRONMENTS[args.env_module]
-    num_agents = args.num_agents or spec["default_agents"]
-
-    if num_agents < 1:
+    if (args.num_agents or ENVIRONMENTS[args.env_module]["default_agents"]) < 1:
         parser.error("--num-agents must be at least 1")
     if args.num_rounds < 1:
         parser.error("--num-rounds must be at least 1")
 
+    return args
+
+
+def build_role(spec: dict, num_agents: int, args) -> str:
+    """Render the standing orders written into every agent's personality."""
+    return spec["role"].format(
+        n=num_agents - 1,
+        pool=args.pool_resources,
+        max_extract=args.max_extraction,
+    )
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+
+    spec = ENVIRONMENTS[args.env_module]
+    num_agents = args.num_agents or spec["default_agents"]
+
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    agents = build_agents(num_agents, args.seed, spec["role"])
+    agents = build_agents(num_agents, args.seed, build_role(spec, num_agents, args))
     init_config = build_init_config(
         agents, args.env_module, spec["env_kwargs"](num_agents, args)
     )
