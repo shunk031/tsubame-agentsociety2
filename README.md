@@ -183,6 +183,31 @@ shellcheck -x -P SCRIPTDIR jobs/*.sh scripts/*.sh scripts/lib/*.sh \
 
 - テスト対象の 2 本は標準ライブラリしか使わない → `pyproject.toml` に依存を足さずに走る
 
+## 結果を読む
+
+```bash
+scripts/plot_run.py <run_dir>                       # 1 ラン
+scripts/plot_run.py <run_dir> <run_dir> -o cmp.html # 複数ランを共通軸で比較
+```
+
+- 出力は HTML 1 ファイル。外部参照ゼロ・JavaScript ゼロ
+  - オフラインのラップトップで開く前提。実測 28〜90 KiB
+  - 図はインライン SVG
+- 標準ライブラリだけで動く ➜ `uv` 環境を起こさずログインノードで叩ける
+  - `pyproject.toml` に依存を足していない理由は「依存構成の制約」と同じ
+- ジョブ内では走らせない
+  - `sim.log` はジョブが終わるまで完結しない
+  - GPU を使わない処理に確保した GPU 時間を払う理由がない
+- 見出しが数値を持つ ➜ 見出しだけ拾えば何が起きたか分かる
+- 合成ランで動作確認できる
+
+```bash
+python3 tests/make_run_fixture.py /tmp/run --scenario bad
+scripts/plot_run.py /tmp/run
+```
+
+設計の意図と、意図的に載せなかったものは `docs/run-report-design.md`。
+
 ## TSUBAME で踏んだ落とし穴
 
 いずれも実機で再現・修正済み。
