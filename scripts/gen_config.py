@@ -62,8 +62,8 @@ ENVIRONMENTS = {
             "each unit you take is worth one point to you. The pool does not "
             "refill. If everyone's requests together exceed what is left, the "
             "remainder is split in proportion to what each of you asked for. "
-            "Decide how much to extract this round by calling submit_extraction "
-            "with your own agent name, and say briefly why you chose that amount."
+            "Each round you decide your own amount and tell the environment "
+            "through ask_env, then say briefly why you chose that amount."
         ),
         # Delivered before every run step. The opening briefing alone does not
         # survive: left to themselves the agents invent unrelated daily lives
@@ -73,11 +73,17 @@ ENVIRONMENTS = {
         # Agents reach the environment through ask_env, which generates the call
         # for them; an instruction to "call submit_extraction" makes the agent
         # try it as a ReAct action and fail with "Unknown tool".
+        # The amount has to survive into the generated call. Phrasing the example
+        # with a placeholder does not work: the agent repeats the placeholder,
+        # the environment cannot read it as an integer, and it clamps the request
+        # to 1 — which is why every extraction came back as exactly 1 unit.
         "instruction": (
-            "It is now round {round}. Decide how many units to extract from the "
-            "shared pool, between 1 and {max_extract}. Then use ask_env to tell "
-            "the environment your decision, phrased as: submit an extraction of "
-            "N units for me. Do this before anything else, and do it only once."
+            "It is now round {round}. First pick a whole number between 1 and "
+            "{max_extract}: how many units you want from the shared pool. Then "
+            "use ask_env once, writing that number out in the request, for "
+            "example 'submit an extraction of 7 units for me' if you chose 7. "
+            "Write the number itself, never a placeholder letter. Do this "
+            "before anything else."
         ),
         "question": (
             "In round {round} of the shared-resource game, how many units did you "
