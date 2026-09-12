@@ -1,0 +1,14 @@
+# Site-specific values: account, group, reservation id.
+config/env.local
+
+# Grid Engine drops job output beside the submit directory.
+*.o[0-9]*
+*.e[0-9]*
+*.po[0-9]*
+*.pe[0-9]*
+
+__pycache__/
+*.py[cod]
+
+# 運用メモ。手元だけで持つ。
+NOTES.md

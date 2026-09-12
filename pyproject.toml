@@ -1,0 +1,24 @@
+[project]
+name = "tsubame-agentsociety2"
+version = "0.0.0"
+description = "Run AgentSociety 2 on TSUBAME 4.0 with a co-located vLLM backend."
+requires-python = "==3.12.*"
+
+dependencies = [
+    "agentsociety2==2.8.7",
+    # agentsociety2 2.8.7 asks for `mcp[cli]>=1.13.1` with no upper bound, but
+    # mcp 2.x renamed FastMCP to MCPServer. Without this cap, resolution picks
+    # 2.x and `import agentsociety2.society.cli` dies on `mcp.server.fastmcp`.
+    "mcp<2",
+    # Left unpinned on purpose. agentsociety2 needs protobuf <6, while recent
+    # vLLM pulls nvidia-cutlass-dsl, which needs protobuf >=6.30.2. Asking for
+    # a specific new vLLM makes the resolution unsatisfiable; leaving it open
+    # lets uv settle on the newest version that shares an environment. That is
+    # currently 0.22.1, comfortably above the >=0.19.0 the Qwen3.6 model card
+    # asks for. uv.lock records the exact resolution.
+    "vllm",
+]
+
+[tool.uv]
+# Nothing here is importable; this project only pins an environment.
+package = false
