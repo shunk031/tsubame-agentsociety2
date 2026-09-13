@@ -72,3 +72,41 @@ Task: It is now round 1. First pick a whole number between 1 and 10 ...
 - ただし**実在する名前を騙られた場合はすり抜ける**
   - 前回 run のヘルパは実在の `Agent-1` を名乗った
   - 事後チェックでは捕まらない。`ask` / `intervene` を置かないことだけが防御になる
+
+**適応セマフォが thinking のばらつきを輻輳と誤読して、並列度を自分で絞る**
+
+- `config/llm_dispatcher.py` の `AdaptiveSemaphore`（AIMD）が LLM 呼び出しを挟む。プロセスごとに 1 個
+- 既定値: 初期 `AGENTSOCIETY_LLM_RAY_CONCURRENCY=16` / `AGENTSOCIETY_LLM_LATENCY_DEGRADE_FACTOR=4.0` /
+  `overload_threshold=0.1`（ハードコード）/ `AGENTSOCIETY_LLM_REQUEST_TIMEOUT=60`
+- 判定は「ベースラインの 4 倍を超えたら slow」。1 ラウンドの 10% が slow なら limit を半減
+- thinking 有効時の応答は 3〜37 秒で**固有に 12 倍ばらつく** ➜ 正常なばらつきが恒常的に slow 判定になる
+  - レート制限は一度も起きない（ログは常に `429=0/N`）
+  - 専用のローカルバックエンドに対しては、輻輳ではなく分散を測っているだけ
+- 実測（4B / 16 エージェント / 4 ラウンド）
+
+  | | 既定 | `LATENCY_DEGRADE_FACTOR=inf` |
+  | --- | --- | --- |
+  | `DECREASE` | 21 回以上 | **0 回** |
+  | ReAct 失敗 | 48 件 | 12 件 |
+  | ラウンド所要 | 429 / 224 / 299 / 60 分超 | 368 / 348 / 321 / 322 |
+
+- ➜ ローカル vLLM では `AGENTSOCIETY_LLM_LATENCY_DEGRADE_FACTOR=inf` で相対判定を切る
+  - コード側に `!= float("inf")` という無効化の分岐がある
+- **GPU は律速ではない。** `Running` は平均 1〜3 本（容量は 32 並列・`max_num_seqs` 256）
+  - ラウンド頭に全員が発火したあと脱同期する。ReAct ループが逐次なので、各エージェントは
+    セマフォではなく自分の直前の呼び出しを待っている
+  - ➜ ラウンド所要は**最も遅い逐次チェーン**で決まる。GPU を増やしても縮まない
+
+**`router_codegen.py` は確率的に init を落とす**
+
+- `EnvRouterActor.init()` が統計コードを LLM に生成させ、実行して検証する
+- 生成コードがリトライ後も実行に失敗すると、シミュレーション本体に入る前に落ちる
+
+```
+router_codegen.py:1888 _generate_statistics_code
+ValueError: Generated statistics code failed execution after retries.
+```
+
+- 4B での実測: 同一構成で 1 回失敗・再実行で成功。再現性はない
+- 確保した GPU 時間を起動だけで捨てることになる（実測 7 分）
+- ➜ 再実行する。落ちたら構成を疑う前に、もう一度投げて切り分ける

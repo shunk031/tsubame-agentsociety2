@@ -130,7 +130,14 @@ scripts/submit.sh jobs/run_sim.sh -l node_f=1 -l h_rt=3:00:00 \
 - 本番モデルは MoE（総 35B / 活性 3B）
   - 重み 37.5GB に対し、1 トークンあたり動くのは 3B 分だけ
   - ➜ 同じ重みサイズの dense より、同時に捌けるリクエスト数が多い
-  - エージェントを増やすほど所要時間は同時処理数で決まる
+  - ただし所要時間を決めるのは同時処理数ではない。実測では GPU はほぼ遊んでいて、
+    1 ラウンドの長さは**最も遅いエージェントの逐次 ReAct チェーン**で決まる
+    ➜ 詳細は `docs/agentsociety2-behaviour.md`
+- エージェント数を変えたら `POOL_RESOURCES` も合わせる
+  - 1 ラウンドの最大需要は `NUM_AGENTS × MAX_EXTRACTION`
+  - 既定（4 体 / 上限 10 / プール 100）は最大需要の 2.5 倍
+  - 16 体のまま既定のプールで回すと最大需要 160 に対し 100 ➜ **2 ラウンドで枯渇し、残りは空振り**
+  - 実測: プール 400 にすると 4 ラウンドとも実際の採取が起きた（66 / 90 / 75 / 86 単位・残 83）
 
 ## 動作確認
 
@@ -260,6 +267,39 @@ shellcheck -x -P SCRIPTDIR jobs/*.sh scripts/*.sh scripts/lib/*.sh \
 
 - Grid Engine は投入元ディレクトリに `*.o<jobid>` を書く。`.gitignore` は rsync に効かない
 - ➜ `scripts/sync.sh` が除外する。素の rsync を使わない
+
+**FP8 の MoE は TensorRT-LLM のカーネルキャッシュで起動に失敗する**
+
+- `VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER` は既定 `1`・SM90+ で有効
+  - 実体は TensorRT-LLM のカーネル。nvcc でローカルに cubin を作り、`tmp/` から `cache/` へ rename して使う
+- その rename が `ENOENT` で失敗 → cubin が空 → engine の初期化が落ちる
+
+```
+[TensorRT-LLM][ERROR] Failed to copy kernel files to cache: filesystem error:
+  cannot rename: No such file or directory
+  [~/.tensorrt_llm/tmp/gemm_swapAB_.../nvcc_kernel.cubin]
+  [~/.tensorrt_llm/cache/gemm_swapAB_.../nvcc_kernel.cubin]
+Assertion failed: .../tensorrt_llm/deep_gemm/runtime.cuh:63,
+  condition: !cubin.empty() || isPathValid(path_)
+```
+
+- **ダウンロードの失敗ではない**。オフラインとは無関係で、ネットワークは要らない
+  - FlashInfer 側の JIT は成功している（`~/.cache/flashinfer/<version>/90a/cached_ops/` に `.so` が残る）
+  - 壊れるのは `~/.tensorrt_llm/` の per-shape キャッシュだけで、空ディレクトリが残る
+- 4B は FP8 ではないのでこの経路を通らない。FP8 モデルで初めて出る
+- ➜ `VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER=0` で経路ごと使わない
+  - 小バッチ（<32）向けの TRT-LLM 最適化を失う。起動しないよりは速い
+  - 副次的に DeepGEMM warmup（1253 カーネル・無言で数分）も省ける。起動 11 分超 → 355 秒
+
+**レポートを外に出すとき、エージェントのログ経由で作業パスが漏れる**
+
+- `scripts/plot_run.py` 自身はパスを書かない。ランのベース名しか使わない
+- だが失敗の集計パネルは `sim.log` の ReAct 失敗行を**そのまま引用**する
+  - ツール呼び出しを拒否されたエージェントは、観測として絶対パスを受け取る
+  - 例: `Path escapes agent workspace: /GS/BS/<group>/.../runs/sim-xxxx/agents/...`
+- 大文字化されて現れることがある ➜ 素直な文字列置換では取り逃がす
+- ランによって出たり出なかったりする ➜ 1 本で確認して「入らない」と判断しない
+- ➜ 公開・共有の前に `scripts/redact.sh` を通し、**大文字小文字を無視して**照合する
 
 エージェントが動かない・参加率が落ちるといった agentsociety2 側の挙動は
 `docs/agentsociety2-behaviour.md` にまとめてある。ステップ構成が届かない件、
