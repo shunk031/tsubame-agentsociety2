@@ -74,6 +74,72 @@ assert_flag "Qwen/Qwen3.6-35B-A3B-FP8" 4 "--enable-auto-tool-choice" present
     assert_flag "Qwen/Qwen3.5-4B" 1 '"enable_thinking": false' present
 ) || failures=$((failures + 1))
 
+# --- port isolation ---------------------------------------------------------
+
+# @description Assert the port derived for a given job id.
+# @arg $1 string JOB_ID to export, or empty for an interactive run.
+# @arg $2 int Expected port.
+assert_port_for_job() {
+    local job_id="$1" expected="$2" rendered label
+
+    label="${job_id:-<interactive>}"
+    rendered="$(
+        JOB_ID="${job_id}" VLLM_PORT="" \
+            bash -c "source '${SCRIPT_DIR}/common.sh'; printf '%s' \"\${VLLM_PORT}\""
+    )"
+
+    if [[ "${rendered}" == "${expected}" ]]; then
+        printf 'ok   %-34s port %s\n' "JOB_ID=${label}" "${rendered}"
+    else
+        printf 'FAIL %-34s port %s, expected %s\n' "JOB_ID=${label}" "${rendered}" "${expected}"
+        failures=$((failures + 1))
+    fi
+}
+
+# Two jobs on one node must not derive the same port; the ids that collided in
+# practice are a good pair to pin.
+assert_port_for_job 8660581 8581
+assert_port_for_job 8660582 8582
+assert_port_for_job "" 8000
+
+# assert_port_free has to fail loudly on a busy port. It once failed silently:
+# a bare `exec` with a redirection applies it to the shell, and the cleanup
+# line sent every later message to /dev/null. Assert the message, not just the
+# exit status.
+(
+    python3 - <<'LISTENER' &
+import socket, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 8199))
+s.listen(1)
+time.sleep(10)
+LISTENER
+    listener=$!
+    sleep 1
+
+    output="$(bash -c "source '${SCRIPT_DIR}/common.sh'; assert_port_free 8199" 2>&1)"
+    status=$?
+    kill "${listener}" 2>/dev/null
+    wait "${listener}" 2>/dev/null
+
+    if [[ "${status}" -ne 0 ]] && [[ "${output}" == *"already serving"* ]]; then
+        printf 'ok   %-34s busy port refused, with a message\n' "assert_port_free"
+        exit 0
+    fi
+    printf 'FAIL %-34s status=%s output=%s\n' "assert_port_free" "${status}" "${output}"
+    exit 1
+) || failures=$((failures + 1))
+
+(
+    if bash -c "source '${SCRIPT_DIR}/common.sh'; assert_port_free 8198" 2>/dev/null; then
+        printf 'ok   %-34s free port accepted\n' "assert_port_free"
+        exit 0
+    fi
+    printf 'FAIL %-34s rejected a free port\n' "assert_port_free"
+    exit 1
+) || failures=$((failures + 1))
+
 if [[ "${failures}" -gt 0 ]]; then
     printf '\n%d check(s) failed\n' "${failures}"
     exit 1

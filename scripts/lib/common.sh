@@ -81,7 +81,18 @@ export ENABLE_THINKING="${ENABLE_THINKING:-1}"
 # templates emit <tool_call><function=...>, which is what qwen3_coder reads.
 TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_coder}"
 VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
-VLLM_PORT="${VLLM_PORT:-8000}"
+
+# Grid Engine places jobs by slot, so two of them can land on one node, and the
+# loopback interface is not namespaced between them. With a fixed port the
+# second job fails to bind, wait_for_vllm's probe is answered by the first
+# job's server, and the run proceeds against a model it never asked for with
+# its own flags silently ignored. Deriving the port from the job id keeps
+# co-located jobs off each other; assert_port_free is what catches the rest.
+if [[ -n "${JOB_ID:-}" ]]; then
+    VLLM_PORT="${VLLM_PORT:-$((8000 + 10#${JOB_ID} % 1000))}"
+else
+    VLLM_PORT="${VLLM_PORT:-8000}"
+fi
 
 # --- AgentSociety -----------------------------------------------------------
 
@@ -234,6 +245,29 @@ build_vllm_args() {
     fi
 }
 
+# @description Fail unless nothing is already listening on the vLLM port.
+# @description
+#   This is the check that makes a port collision loud. Deriving the port from
+#   the job id makes a clash unlikely, not impossible, and a stale server from
+#   an earlier job can hold the port too. Without this, the health probe is
+#   satisfied by whoever is listening: the job reports "vLLM healthy after 0s",
+#   runs its whole simulation against another job's model, and exits 0. When
+#   the two jobs happen to serve the same model even check_endpoint.py passes,
+#   so nothing downstream would notice.
+# @arg $1 int Port to test.
+# @exitcode 1 Something is already listening.
+assert_port_free() {
+    local port="$1"
+
+    # The probe runs in a subshell, so the descriptor it opens is never held by
+    # this shell and needs no closing here. Do not add a bare `exec` with
+    # redirections to tidy up: that applies them to the shell itself, and
+    # `exec 2>/dev/null` would silently discard the message below.
+    if (exec 3<>"/dev/tcp/${VLLM_HOST}/${port}") 2>/dev/null; then
+        die "${VLLM_HOST}:${port} on $(hostname) is already serving; refusing to start rather than talk to another job's vLLM. Override VLLM_PORT to pick another."
+    fi
+}
+
 # @description Block until the vLLM server reports healthy.
 # @description
 #   Polls /health instead of sleeping a fixed interval, because model load time
@@ -290,8 +324,10 @@ stop_vllm() {
 start_vllm() {
     local dp_size="$1" log_file="$2"
 
+    assert_port_free "${VLLM_PORT}"
+
     build_vllm_args "${dp_size}"
-    log "starting vLLM, logging to ${log_file}"
+    log "starting vLLM on ${VLLM_HOST}:${VLLM_PORT}, logging to ${log_file}"
     "${VENV}/bin/vllm" "${VLLM_ARGS[@]}" >"${log_file}" 2>&1 &
     VLLM_PID=$!
     trap stop_vllm EXIT
