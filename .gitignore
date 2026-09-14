@@ -12,3 +12,11 @@ __pycache__/
 
 # 運用メモ。手元だけで持つ。
 NOTES.md
+
+# A `lib/` pattern in a user's global ignore file (core.excludesFile) also
+# matches scripts/lib/, so a new helper there cannot be staged without
+# `git add -f` and `git add` prints a confusing "ignored by one of your
+# .gitignore files" error. Re-including the directory itself overrides it;
+# re-including individual files would not, because git does not descend into
+# an excluded directory.
+!scripts/lib/
