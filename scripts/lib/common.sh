@@ -180,6 +180,48 @@ detect_cpu_cores() {
     fi
 }
 
+# --- Source tree ------------------------------------------------------------
+
+# @description Refuse to ship a checkout that is behind its upstream.
+# @description
+#   scripts/sync.sh mirrors the working tree, not a commit, so a checkout that
+#   has not been pulled puts old code on the cluster with nothing to say so.
+#   That is not a theoretical risk: a batch of ten jobs once ran the previous
+#   commit this way, silently, because the sync happened before the pull.
+#
+#   The comparison is against the remote-tracking ref as it stands, with no
+#   network access, so it reflects the last fetch. It stays quiet when there is
+#   no upstream to compare against — a feature branch that was never pushed is
+#   a normal thing to sync, and a guard that fires on those gets ignored.
+#
+#   Set SYNC_ALLOW_STALE=1 to ship an older tree deliberately.
+# @arg $1 path Repository to inspect. Defaults to REPO_ROOT.
+# @exitcode 1 The branch is behind its upstream and SYNC_ALLOW_STALE is unset.
+assert_not_behind_upstream() {
+    local repo="${1:-${REPO_ROOT}}" branch upstream behind ahead head
+
+    git -C "${repo}" rev-parse --git-dir >/dev/null 2>&1 || return 0
+
+    branch="$(git -C "${repo}" rev-parse --abbrev-ref HEAD 2>/dev/null)" || return 0
+    [[ "${branch}" != "HEAD" ]] || return 0
+
+    upstream="$(git -C "${repo}" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)" || return 0
+    [[ -n "${upstream}" ]] || return 0
+
+    behind="$(git -C "${repo}" rev-list --count "HEAD..${upstream}" 2>/dev/null)" || return 0
+    [[ "${behind}" -gt 0 ]] || return 0
+
+    ahead="$(git -C "${repo}" rev-list --count "${upstream}..HEAD" 2>/dev/null || echo 0)"
+    head="$(git -C "${repo}" rev-parse --short HEAD 2>/dev/null)"
+
+    if [[ -n "${SYNC_ALLOW_STALE:-}" ]]; then
+        log "WARNING: ${branch} (${head}) is ${behind} commit(s) behind ${upstream}; shipping it anyway because SYNC_ALLOW_STALE is set"
+        return 0
+    fi
+
+    die "${branch} (${head}) is ${behind} commit(s) behind ${upstream} (${ahead} ahead). sync.sh copies the working tree, so the cluster would run code your git history does not match. Pull first, or set SYNC_ALLOW_STALE=1 to ship this tree on purpose."
+}
+
 # --- vLLM -------------------------------------------------------------------
 
 # @description Populate the global VLLM_ARGS array for the selected model.

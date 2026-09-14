@@ -26,7 +26,16 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 REMOTE_REPO="${REMOTE_REPO:-tsubame-agentsociety2}"
 
-log "syncing ${REPO_ROOT} to ${TSUBAME_LOGIN_HOST}:~/${REMOTE_REPO}"
+assert_not_behind_upstream "${REPO_ROOT}"
+
+# Name the commit on every sync, not only when the guard fires. The tree is
+# what gets copied, so the commit is the only handle tying a run back to the
+# code that produced it.
+sync_head="$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || echo '<not a git repo>')"
+sync_branch="$(git -C "${REPO_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '-')"
+sync_dirty="$(git -C "${REPO_ROOT}" status --porcelain 2>/dev/null | grep -cv '^?? ' || true)"
+
+log "syncing ${REPO_ROOT} (${sync_branch} ${sync_head}, ${sync_dirty} uncommitted) to ${TSUBAME_LOGIN_HOST}:~/${REMOTE_REPO}"
 
 rsync -az --delete \
     --exclude '.git' \

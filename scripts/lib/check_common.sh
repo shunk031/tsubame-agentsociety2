@@ -140,6 +140,81 @@ LISTENER
     exit 1
 ) || failures=$((failures + 1))
 
+# --- staleness guard --------------------------------------------------------
+
+# assert_not_behind_upstream decides whether the cluster gets the code the git
+# history claims. Exercise it against real repositories: a fixture built from
+# strings would only test the string handling, and what failed in practice was
+# the comparison against a remote-tracking ref.
+(
+    fixture="$(mktemp -d)"
+    trap 'rm -rf "${fixture}"' EXIT
+    cd "${fixture}" || exit 1
+
+    git init -q --bare origin.git
+    # Without this the bare HEAD names a branch that does not exist, the second
+    # clone checks out nothing, and the fixture silently tests the wrong thing.
+    git -C origin.git symbolic-ref HEAD refs/heads/main
+
+    git clone -q origin.git work 2>/dev/null
+    git -C work config user.email t@example.invalid
+    git -C work config user.name t
+    git -C work checkout -qb main
+    echo one >"work/f"
+    git -C work add f
+    git -C work commit -qm one
+    git -C work push -qu origin main
+
+    local_failures=0
+
+    # Up to date: the guard has nothing to say.
+    if bash -c "source '${SCRIPT_DIR}/common.sh'; assert_not_behind_upstream '${fixture}/work'" 2>/dev/null; then
+        printf 'ok   %-34s up to date passes\n' "assert_not_behind_upstream"
+    else
+        printf 'FAIL %-34s blocked an up-to-date tree\n' "assert_not_behind_upstream"
+        local_failures=$((local_failures + 1))
+    fi
+
+    # Move the upstream ahead of the checkout.
+    git clone -q origin.git pusher 2>/dev/null
+    git -C pusher config user.email t@example.invalid
+    git -C pusher config user.name t
+    echo two >>"pusher/f"
+    git -C pusher add f
+    git -C pusher commit -qm two
+    git -C pusher push -q origin main
+    git -C work fetch -q origin
+
+    output="$(bash -c "source '${SCRIPT_DIR}/common.sh'; assert_not_behind_upstream '${fixture}/work'; echo REACHED" 2>&1)"
+    if [[ "${output}" != *REACHED* ]] && [[ "${output}" == *"commit(s) behind"* ]]; then
+        printf 'ok   %-34s behind upstream refused, with a message\n' "assert_not_behind_upstream"
+    else
+        printf 'FAIL %-34s behind upstream not refused: %s\n' "assert_not_behind_upstream" "${output}"
+        local_failures=$((local_failures + 1))
+    fi
+
+    # The deliberate escape hatch warns and continues.
+    output="$(bash -c "source '${SCRIPT_DIR}/common.sh'; SYNC_ALLOW_STALE=1 assert_not_behind_upstream '${fixture}/work'; echo REACHED" 2>&1)"
+    if [[ "${output}" == *REACHED* ]] && [[ "${output}" == *WARNING* ]]; then
+        printf 'ok   %-34s SYNC_ALLOW_STALE warns and continues\n' "assert_not_behind_upstream"
+    else
+        printf 'FAIL %-34s SYNC_ALLOW_STALE did not continue: %s\n' "assert_not_behind_upstream" "${output}"
+        local_failures=$((local_failures + 1))
+    fi
+
+    # A branch with no upstream is an ordinary thing to sync. Firing here would
+    # train the reader to ignore the guard.
+    git -C work checkout -qb feature
+    if bash -c "source '${SCRIPT_DIR}/common.sh'; assert_not_behind_upstream '${fixture}/work'" 2>/dev/null; then
+        printf 'ok   %-34s no upstream stays quiet\n' "assert_not_behind_upstream"
+    else
+        printf 'FAIL %-34s fired on a branch with no upstream\n' "assert_not_behind_upstream"
+        local_failures=$((local_failures + 1))
+    fi
+
+    exit "${local_failures}"
+) || failures=$((failures + $?))
+
 if [[ "${failures}" -gt 0 ]]; then
     printf '\n%d check(s) failed\n' "${failures}"
     exit 1
