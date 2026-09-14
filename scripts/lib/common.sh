@@ -170,8 +170,8 @@ MAX_EXTRACTION="${MAX_EXTRACTION:-10}"
 # a comparison across that gap measures the cache rather than the change.
 #
 # Pointing this at the run directory gives every run a cold cache, so two runs
-# of the same configuration produce the same numbers. Set SHARED_AGENT_HOME to
-# a path to opt back into a cache that persists across runs -- worth it when
+# of the same configuration produce the same numbers. Set AGENT_HOME_MODE to
+# `shared` to opt back into a cache that persists across runs -- worth it when
 # throughput matters more than comparability.
 AGENT_HOME_MODE="${AGENT_HOME_MODE:-per-run}"
 
