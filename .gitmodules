@@ -1,0 +1,4 @@
+[submodule "vendor/AgentSociety"]
+	path = vendor/AgentSociety
+	url = https://github.com/shunk031/AgentSociety.git
+	branch = main
