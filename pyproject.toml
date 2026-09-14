@@ -5,7 +5,7 @@ description = "Run AgentSociety 2 on TSUBAME 4.0 with a co-located vLLM backend.
 requires-python = "==3.12.*"
 
 dependencies = [
-    "agentsociety2==2.8.7",
+    "agentsociety2",
     # agentsociety2 2.8.7 asks for `mcp[cli]>=1.13.1` with no upper bound, but
     # mcp 2.x renamed FastMCP to MCPServer. Without this cap, resolution picks
     # 2.x and `import agentsociety2.society.cli` dies on `mcp.server.fastmcp`.
@@ -19,6 +19,19 @@ dependencies = [
     "vllm",
 ]
 
+[tool.uv.sources]
+# Vendored as a submodule so the router selection can be patched; see
+# vendor/AgentSociety. Pinned to the agentsociety2-v2.8.7 tag, whose
+# pyproject.toml is byte-identical in its constraints to the published wheel,
+# so this changes where the package comes from and not what it requires.
+agentsociety2 = { path = "vendor/AgentSociety/packages/agentsociety2" }
+
 [tool.uv]
 # Nothing here is importable; this project only pins an environment.
 package = false
+
+[tool.pytest.ini_options]
+# Without this, pytest walks into vendor/AgentSociety and collects the upstream
+# monorepo's own tests -- and its examples, which import modules this project
+# never installs. Those are the dependency's tests, not this repository's.
+testpaths = ["tests"]

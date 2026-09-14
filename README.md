@@ -73,6 +73,23 @@ scripts/ssh.sh 'bash "$REMOTE_REPO"/scripts/setup/03_download_models.sh'
 
 ### 依存構成の制約
 
+`agentsociety2` は `vendor/AgentSociety` の submodule から入る。上流のモノレポを
+fork したもので、`agentsociety2-v2.8.7` タグに固定してある。PyPI 版と制約は同一
+（`protobuf>=4.0.0` / `mcp[cli]>=1.13.1`）なので、解決結果は変わらない。
+
+```bash
+git submodule update --init --recursive
+```
+
+**`uv lock` は `--no-config` を付ける。** このリポジトリの lock に `[options]` は無い。
+手元の `~/.config/uv/uv.toml` に `exclude-newer` があると、それが `uv.lock` に
+埋め込まれ、その設定を持たないクラスタ側で `uv sync --locked` が
+`Resolving despite existing lockfile due to removal of global exclude newer` で失敗する。
+ローカルでは通ってクラスタでだけ落ちるので、気づきにくい。
+
+`protobuf` の上限は `agentsociety2` ではなく `pycityproto`（`<6.0.0`）が課している。
+
+
 vLLM のバージョンを明示指定すると解決できない。
 
 ```
