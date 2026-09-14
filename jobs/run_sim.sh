@@ -65,6 +65,17 @@ export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 
 start_vllm "${DP_SIZE}" "${RUN_DIR}/vllm.log"
 
+# Second, and after the generation server: it is the one whose memory budget
+# matters, and starting it first means a failure there costs nothing else.
+if [[ "${ENABLE_EMBEDDING}" != "0" ]]; then
+    start_embedding_vllm "${RUN_DIR}/vllm-embedding.log"
+    export AGENTSOCIETY_EMBEDDING_API_BASE="http://${VLLM_HOST}:${EMBEDDING_PORT}/v1"
+    export AGENTSOCIETY_EMBEDDING_MODEL="${EMBEDDING_MODEL}"
+    log "embeddings   ${AGENTSOCIETY_EMBEDDING_MODEL} at ${AGENTSOCIETY_EMBEDDING_API_BASE}"
+else
+    log "embeddings   disabled; every ask_env will miss the codegen cache"
+fi
+
 log "verifying the endpoint before handing it to the simulator"
 MODEL="${MODEL}" \
 ENDPOINT="http://${VLLM_HOST}:${VLLM_PORT}" \

@@ -27,9 +27,16 @@ source "${SCRIPT_DIR}/../lib/common.sh"
 
 mkdir -p "${HF_HOME}"
 
-log "downloading ${MODEL} into ${HF_HOME}"
+# The embedding model is fetched alongside the generation model because a run
+# needs both: without it every ask_env regenerates its code. ENABLE_EMBEDDING=0
+# skips it for a job that deliberately goes without.
+targets=("${MODEL}")
+[[ "${ENABLE_EMBEDDING}" == "0" ]] || targets+=("${EMBEDDING_MODEL}")
 
-MODEL="${MODEL}" "${VENV}/bin/python" - <<'PY'
+for target in "${targets[@]}"; do
+log "downloading ${target} into ${HF_HOME}"
+
+MODEL="${target}" "${VENV}/bin/python" - <<'PY'
 import os
 
 from huggingface_hub import snapshot_download
@@ -61,5 +68,6 @@ total = sum(
 print(f"cached at {path}")
 print(f"size      {total / 1e9:.1f} GB")
 PY
+done
 
 log "download complete"

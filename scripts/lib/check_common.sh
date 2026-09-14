@@ -215,6 +215,56 @@ LISTENER
     exit "${local_failures}"
 ) || failures=$((failures + $?))
 
+# --- embedding server -------------------------------------------------------
+
+# The generation and embedding servers share one GPU, so their reservations
+# have to add up to less than the card. Nothing at runtime checks that, and
+# exceeding it fails at model load with an out-of-memory error that reads like
+# a model-size problem rather than a configuration one.
+(
+    total="$(
+        bash -c "source '${SCRIPT_DIR}/common.sh'; awk -v a=\"\${GPU_MEMORY_UTILIZATION}\" -v b=\"\${EMBEDDING_GPU_MEMORY_UTILIZATION}\" 'BEGIN{printf \"%.2f\", a+b}'"
+    )"
+    if awk -v t="${total}" 'BEGIN{exit !(t < 0.95)}'; then
+        printf 'ok   %-34s GPU budget %s leaves headroom\n' "embedding" "${total}"
+        exit 0
+    fi
+    printf 'FAIL %-34s GPU budget %s is too tight\n' "embedding" "${total}"
+    exit 1
+) || failures=$((failures + 1))
+
+# Both servers on one node need different ports, and the embedding port has to
+# be derived per job for the same reason the generation port is.
+assert_embedding_port() {
+    local job_id="$1" expected="$2" rendered
+    rendered="$(
+        JOB_ID="${job_id}" EMBEDDING_PORT="" \
+            bash -c "source '${SCRIPT_DIR}/common.sh'; printf '%s' \"\${EMBEDDING_PORT}\""
+    )"
+    if [[ "${rendered}" == "${expected}" ]]; then
+        printf 'ok   %-34s JOB_ID=%s port %s\n' "embedding port" "${job_id:-<interactive>}" "${rendered}"
+    else
+        printf 'FAIL %-34s JOB_ID=%s port %s, expected %s\n' "embedding port" "${job_id:-<interactive>}" "${rendered}" "${expected}"
+        failures=$((failures + 1))
+    fi
+}
+assert_embedding_port 8663355 9355
+assert_embedding_port "" 9000
+
+# The two ports must not collide with each other for the same job.
+(
+    read -r gen emb <<<"$(
+        JOB_ID=8663355 VLLM_PORT="" EMBEDDING_PORT="" \
+            bash -c "source '${SCRIPT_DIR}/common.sh'; printf '%s %s' \"\${VLLM_PORT}\" \"\${EMBEDDING_PORT}\""
+    )"
+    if [[ "${gen}" != "${emb}" ]]; then
+        printf 'ok   %-34s generation %s and embedding %s differ\n' "embedding port" "${gen}" "${emb}"
+        exit 0
+    fi
+    printf 'FAIL %-34s both servers would bind %s\n' "embedding port" "${gen}"
+    exit 1
+) || failures=$((failures + 1))
+
 if [[ "${failures}" -gt 0 ]]; then
     printf '\n%d check(s) failed\n' "${failures}"
     exit 1

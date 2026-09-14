@@ -94,6 +94,37 @@ else
     VLLM_PORT="${VLLM_PORT:-8000}"
 fi
 
+# --- Embedding --------------------------------------------------------------
+
+# Every ask_env misses the code-generation template cache without one. The
+# router asks for an embedding, the call fails, `_lookup` returns
+# `embedding_unavailable`, and the instruction is regenerated from scratch. On
+# a 128-agent run that was 1487 misses and 11179 seconds of ask_env — and the
+# env actor serialises those, so it is the run's critical path rather than a
+# per-agent cost.
+#
+# Serving one costs a second vLLM process: vLLM runs one model per process.
+# Set ENABLE_EMBEDDING=0 to go without it.
+ENABLE_EMBEDDING="${ENABLE_EMBEDDING:-1}"
+
+# 0.6B, ~1.2 GB. Its 1024 dimensions already match what agentsociety2 expects,
+# so AGENTSOCIETY_EMBEDDING_DIMS needs no override.
+EMBEDDING_MODEL="${EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}"
+
+# A separate port from the generation server, derived the same way so two jobs
+# on one node stay apart. assert_port_free covers what derivation misses.
+if [[ -n "${JOB_ID:-}" ]]; then
+    EMBEDDING_PORT="${EMBEDDING_PORT:-$((9000 + 10#${JOB_ID} % 1000))}"
+else
+    EMBEDDING_PORT="${EMBEDDING_PORT:-9000}"
+fi
+
+# Both servers share one GPU, so their reservations have to add up to less than
+# the card. The generation model keeps the bulk; this is the remainder it
+# leaves, not an independent budget.
+EMBEDDING_GPU_MEMORY_UTILIZATION="${EMBEDDING_GPU_MEMORY_UTILIZATION:-0.06}"
+EMBEDDING_MAX_MODEL_LEN="${EMBEDDING_MAX_MODEL_LEN:-2048}"
+
 # --- AgentSociety -----------------------------------------------------------
 
 # A placeholder, not a secret: vLLM serves an unauthenticated local endpoint and
@@ -340,6 +371,72 @@ wait_for_vllm() {
 
     log "vLLM did not become healthy within ${VLLM_STARTUP_TIMEOUT}s"
     return 1
+}
+
+# @description Start a second vLLM serving the embedding model.
+# @description
+#   vLLM serves one model per process, so the codegen cache needs its own
+#   server. It shares the GPU with the generation model, which is why the two
+#   memory fractions are set together rather than each taking a default.
+#
+#   `--runner pooling --convert embed` is required rather than optional:
+#   Qwen3-Embedding is built on the Qwen3 causal-LM architecture, so `auto`
+#   loads it as a generative model and /v1/embeddings never appears. vLLM
+#   0.22.1 has no `--task`; that flag was replaced by this pair.
+# @arg $1 path File to write the server log to.
+# @exitcode 1 Server failed to start.
+start_embedding_vllm() {
+    local log_file="$1"
+
+    assert_port_free "${EMBEDDING_PORT}"
+
+    log "starting embedding vLLM (${EMBEDDING_MODEL}) on ${VLLM_HOST}:${EMBEDDING_PORT}, logging to ${log_file}"
+    "${VENV}/bin/vllm" serve "${EMBEDDING_MODEL}" \
+        --host "${VLLM_HOST}" \
+        --port "${EMBEDDING_PORT}" \
+        --runner pooling \
+        --convert embed \
+        --max-model-len "${EMBEDDING_MAX_MODEL_LEN}" \
+        --gpu-memory-utilization "${EMBEDDING_GPU_MEMORY_UTILIZATION}" \
+        >"${log_file}" 2>&1 &
+    EMBEDDING_PID=$!
+    trap stop_all_vllm EXIT
+
+    local url="http://${VLLM_HOST}:${EMBEDDING_PORT}/health" waited=0
+    while [[ "${waited}" -lt "${VLLM_STARTUP_TIMEOUT}" ]]; do
+        if ! kill -0 "${EMBEDDING_PID}" 2>/dev/null; then
+            log "embedding vLLM exited before becoming healthy; last 40 lines:"
+            tail -40 "${log_file}" >&2 || true
+            die "embedding vLLM failed to start"
+        fi
+        if curl -sf -o /dev/null --max-time 5 "${url}"; then
+            log "embedding vLLM healthy after ${waited}s"
+            return 0
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+
+    log "last 40 lines of ${log_file}:"
+    tail -40 "${log_file}" >&2 || true
+    die "embedding vLLM did not become healthy within ${VLLM_STARTUP_TIMEOUT}s"
+}
+
+# @description Stop both vLLM servers, if they are still up.
+# @description
+#   Replaces stop_vllm as the EXIT trap once a second server exists. Without it
+#   the embedding server survives the job and holds its GPU memory until the
+#   wall clock runs out.
+# shellcheck disable=SC2317
+stop_all_vllm() {
+    local pid
+    for pid in "${EMBEDDING_PID:-}" "${VLLM_PID:-}"; do
+        if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+            log "stopping vLLM (pid ${pid})"
+            kill "${pid}" 2>/dev/null || true
+            wait "${pid}" 2>/dev/null || true
+        fi
+    done
 }
 
 # @description Stop the vLLM server started by start_vllm, if it is still up.
