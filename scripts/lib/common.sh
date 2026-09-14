@@ -158,6 +158,23 @@ TICK_SECONDS="${TICK_SECONDS:-900}"
 POOL_RESOURCES="${POOL_RESOURCES:-100}"
 MAX_EXTRACTION="${MAX_EXTRACTION:-10}"
 
+# Where agentsociety2 keeps state that outlives a run. Upstream defaults
+# AGENTSOCIETY_HOME_DIR to "./agentsociety_data", which is relative to the
+# working directory, and Grid Engine runs jobs from the submit directory --
+# so every job on this cluster shared one codegen template cache and kept
+# adding to it.
+#
+# That makes a measurement depend on which runs happened before it. A 16-agent
+# run logged 175-237 template cache misses early on and 11-12 for the same
+# configuration later, purely because the cache had warmed up in between, and
+# a comparison across that gap measures the cache rather than the change.
+#
+# Pointing this at the run directory gives every run a cold cache, so two runs
+# of the same configuration produce the same numbers. Set AGENT_HOME_MODE to
+# `shared` to opt back into a cache that persists across runs -- worth it when
+# throughput matters more than comparability.
+AGENT_HOME_MODE="${AGENT_HOME_MODE:-per-run}"
+
 # Replay records required before a run counts as successful.
 MIN_REPLAY_RECORDS="${MIN_REPLAY_RECORDS:-1}"
 
