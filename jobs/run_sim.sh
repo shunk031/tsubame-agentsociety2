@@ -37,11 +37,22 @@ source "${REPO_ROOT}/scripts/lib/common.sh"
 RUN_DIR="${RUNS_DIR}/sim-${JOB_ID:-local-$$}"
 mkdir -p "${RUN_DIR}"
 
+# Keep the codegen template cache inside the run unless asked otherwise, so a
+# run's numbers do not depend on which runs preceded it. See the note in
+# scripts/lib/common.sh.
+if [[ "${AGENT_HOME_MODE}" == "per-run" ]]; then
+    export AGENTSOCIETY_HOME_DIR="${AGENTSOCIETY_HOME_DIR:-${RUN_DIR}/agent-home}"
+else
+    export AGENTSOCIETY_HOME_DIR="${AGENTSOCIETY_HOME_DIR:-${WORK_ROOT}/agent-home}"
+fi
+mkdir -p "${AGENTSOCIETY_HOME_DIR}"
+
 log "host    $(hostname)"
 log "job     ${JOB_ID:-<interactive>}"
 log "run dir ${RUN_DIR}"
 log "model   ${MODEL}"
 log "env     ${ENV_MODULE}"
+log "state   ${AGENT_HOME_MODE} (${AGENTSOCIETY_HOME_DIR})"
 log "agents  ${NUM_AGENTS:-<env default>} over ${NUM_ROUNDS} rounds of ${TICK_SECONDS}s"
 
 GPU_COUNT="$(detect_gpu_count)"

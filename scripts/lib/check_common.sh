@@ -265,6 +265,47 @@ assert_embedding_port "" 9000
     exit 1
 ) || failures=$((failures + 1))
 
+# --- run state isolation ----------------------------------------------------
+
+# Upstream's AGENTSOCIETY_HOME_DIR default is relative to the working
+# directory, so every job on this cluster shared one codegen cache and a
+# measurement depended on which runs came before it. Assert the mode variable
+# and that jobs/run_sim.sh actually acts on it, since the value alone changes
+# nothing.
+assert_home_mode() {
+    local mode="$1" expected="$2" rendered
+    rendered="$(
+        AGENT_HOME_MODE="${mode}" \
+            bash -c "source '${SCRIPT_DIR}/common.sh'; printf '%s' \"\${AGENT_HOME_MODE}\""
+    )"
+    if [[ "${rendered}" == "${expected}" ]]; then
+        printf 'ok   %-34s %s\n' "agent home mode" "${rendered}"
+    else
+        printf 'FAIL %-34s %s, expected %s\n' "agent home mode" "${rendered}" "${expected}"
+        failures=$((failures + 1))
+    fi
+}
+assert_home_mode "" per-run
+assert_home_mode shared shared
+
+(
+    job="${SCRIPT_DIR}/../../jobs/run_sim.sh"
+    missing=0
+    # The run directory must be the default home, and the export has to happen
+    # before the simulation starts rather than only being computed.
+    # Literal, not an expansion: this is the text the job script must contain.
+    # shellcheck disable=SC2016
+    grep -qF 'AGENTSOCIETY_HOME_DIR="${AGENTSOCIETY_HOME_DIR:-${RUN_DIR}/agent-home}"' "${job}" || missing=1
+    grep -q 'export AGENTSOCIETY_HOME_DIR' "${job}" || missing=1
+    grep -q 'AGENT_HOME_MODE' "${job}" || missing=1
+    if [[ "${missing}" -eq 0 ]]; then
+        printf 'ok   %-34s run_sim.sh exports a per-run home\n' "agent home mode"
+        exit 0
+    fi
+    printf 'FAIL %-34s run_sim.sh does not export a per-run home\n' "agent home mode"
+    exit 1
+) || failures=$((failures + 1))
+
 if [[ "${failures}" -gt 0 ]]; then
     printf '\n%d check(s) failed\n' "${failures}"
     exit 1
