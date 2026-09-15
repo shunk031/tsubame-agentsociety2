@@ -306,6 +306,59 @@ assert_home_mode shared shared
     exit 1
 ) || failures=$((failures + 1))
 
+# Upstream submits ceil(N / BATCH_SIZE) step_agent_batch Ray Tasks per tick and
+# runs at most LLM_RAY_MAX_WORKERS of them at once, so its default batch of 256
+# gives every population this repository has run a single task -- one process
+# holding one AIMD semaphore, which is why neither more agents nor more workers
+# ever raised the concurrent request count. The rule to restore is upstream's
+# own: pick a batch where ceil(N / BATCH_SIZE) >= worker count.
+assert_batch_size() {
+    local agents="$1" workers="$2" expected="$3" got tasks
+    got="$(
+        bash -c "source '${SCRIPT_DIR}/common.sh'; ray_batch_size '${agents}' '${workers}'"
+    )"
+    if [[ "${got}" != "${expected}" ]]; then
+        printf 'FAIL %-34s N=%s w=%s -> %s, expected %s\n' \
+            "ray batch size" "${agents}" "${workers}" "${got}" "${expected}"
+        failures=$((failures + 1))
+        return
+    fi
+    # The batch is only right if it actually fills the workers, so assert the
+    # saturation rule itself rather than trusting the arithmetic above.
+    tasks=$(( (agents + got - 1) / got ))
+    if (( agents > 0 && tasks < workers && agents >= workers )); then
+        printf 'FAIL %-34s N=%s w=%s -> %s tasks, workers idle\n' \
+            "ray batch size" "${agents}" "${workers}" "${tasks}"
+        failures=$((failures + 1))
+        return
+    fi
+    printf 'ok   %-34s N=%s w=%s -> batch %s, %s task(s)\n' \
+        "ray batch size" "${agents}" "${workers}" "${got}" "${tasks}"
+}
+assert_batch_size 128 8 16
+assert_batch_size 100 8 12
+assert_batch_size 17 8 2
+assert_batch_size 16 8 2
+# Fewer agents than workers cannot fill them; one agent per task is the best
+# available and must not round down to a zero-sized batch.
+assert_batch_size 4 8 1
+# An unknown population (NUM_AGENTS=0 means "use the config default") has no
+# basis for a split, so fall back to upstream's own default rather than guess.
+assert_batch_size 0 8 256
+
+(
+    job="${SCRIPT_DIR}/../../jobs/run_sim.sh"
+    missing=0
+    grep -q 'ray_batch_size' "${job}" || missing=1
+    grep -q -- '--batch-size' "${job}" || missing=1
+    if [[ "${missing}" -eq 0 ]]; then
+        printf 'ok   %-34s run_sim.sh passes --batch-size\n' "ray batch size"
+        exit 0
+    fi
+    printf 'FAIL %-34s run_sim.sh never passes --batch-size\n' "ray batch size"
+    exit 1
+) || failures=$((failures + 1))
+
 if [[ "${failures}" -gt 0 ]]; then
     printf '\n%d check(s) failed\n' "${failures}"
     exit 1
