@@ -381,6 +381,49 @@ assert_batch_size 0 8 256
     exit 1
 ) || failures=$((failures + 1))
 
+# The FP8 MoE path JIT-compiles a TensorRT-LLM GEMM, writes the cubin under
+# tmp/ and renames it into cache/. Four jobs that start together compile the
+# same shape into the same shared directory and three of them lose the rename
+# to ENOENT, which surfaces as "Assertion failed: !cubin.empty()" and a vLLM
+# that never starts. Both halves are asserted: the path is switched off, and
+# the cache is per-job so nothing else on that path can collide either.
+(
+    rendered="$(
+        JOB_ID=4242 TMPDIR=/tmp/check-jobtmp \
+            bash -c "source '${SCRIPT_DIR}/common.sh'; printf '%s|%s' \"\${VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER}\" \"\${TRTLLM_DG_CACHE_DIR}\""
+    )"
+    flag="${rendered%%|*}" cache="${rendered##*|}"
+    missing=0
+    [[ "${flag}" == "0" ]] || missing=1
+    # Per job, not merely somewhere writable: a constant path outside home
+    # would still be shared by every job on the cluster. It must also land on
+    # the job's own TMPDIR, so the artefacts go to node-local scratch and are
+    # reclaimed with the job rather than accumulating on a shared filesystem.
+    [[ "${cache}" == *4242* ]] || missing=1
+    [[ "${cache}" == /tmp/check-jobtmp/* ]] || missing=1
+    if [[ "${missing}" -eq 0 ]]; then
+        printf 'ok   %-34s off, cache at %s\n' "trtllm gemm jit" "${cache}"
+        exit 0
+    fi
+    printf 'FAIL %-34s flag=%s cache=%s\n' "trtllm gemm jit" "${flag}" "${cache}"
+    exit 1
+) || failures=$((failures + 1))
+
+(
+    # Exported, not merely assigned: vLLM runs in a child process and a shell
+    # variable would never reach it.
+    lib="${SCRIPT_DIR}/common.sh"
+    missing=0
+    grep -q 'export VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER' "${lib}" || missing=1
+    grep -q 'export TRTLLM_DG_CACHE_DIR' "${lib}" || missing=1
+    if [[ "${missing}" -eq 0 ]]; then
+        printf 'ok   %-34s both exported\n' "trtllm gemm jit"
+        exit 0
+    fi
+    printf 'FAIL %-34s not exported to the vLLM child\n' "trtllm gemm jit"
+    exit 1
+) || failures=$((failures + 1))
+
 if [[ "${failures}" -gt 0 ]]; then
     printf '\n%d check(s) failed\n' "${failures}"
     exit 1
