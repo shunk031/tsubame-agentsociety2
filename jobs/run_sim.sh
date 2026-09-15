@@ -64,12 +64,44 @@ DP_SIZE="${DP_SIZE:-${GPU_COUNT}}"
 CPU_CORES="$(detect_cpu_cores)"
 export AGENTSOCIETY_LLM_RAY_MAX_WORKERS="${AGENTSOCIETY_LLM_RAY_MAX_WORKERS:-${CPU_CORES}}"
 
+# Declaring the worker budget above buys nothing on its own: the tick only
+# submits ceil(NUM_AGENTS / batch) tasks, and upstream's default batch of 256
+# makes that exactly one for every population run here. Size the batch to the
+# budget so the workers actually receive work.
+BATCH_SIZE="${BATCH_SIZE:-$(ray_batch_size "${NUM_AGENTS}" "${AGENTSOCIETY_LLM_RAY_MAX_WORKERS}")}"
+RAY_TASKS=$(( NUM_AGENTS > 0 ? (NUM_AGENTS + BATCH_SIZE - 1) / BATCH_SIZE : 1 ))
+
+# vLLM JIT-compiles CUDA kernels at startup (FlashInfer's gated-delta-net
+# prefill, among others) and ninja sizes itself from nproc unless MAX_JOBS says
+# otherwise. nproc reports the whole physical node, so ninja fans out to
+# hundreds of nvcc processes, the kernel OOM killer takes cicc with signal 9,
+# and the only visible symptom is "Ninja build failed" and a vLLM that never
+# binds its port. Nothing caps this job's memory (see the probe below), so the
+# build competes for the node's physical RAM with whatever else is running
+# there and the victim need not be ours. Three 35B jobs died this way before
+# the cause was found; the granted slot count is the bound that keeps the
+# build proportional to the slots actually scheduled.
+export MAX_JOBS="${MAX_JOBS:-${CPU_CORES}}"
+
 # ray.init is called without _temp_dir, so Ray falls back to /tmp. Grid Engine
 # gives each job a private TMPDIR on node-local storage; pointing Ray at it
 # keeps runs from colliding over a shared path.
 export RAY_TMPDIR="${RAY_TMPDIR:-${TMPDIR:-/tmp}}"
 
-log "cpus    ${CPU_CORES} (Ray workers ${AGENTSOCIETY_LLM_RAY_MAX_WORKERS})"
+# What the JIT compile has to fit inside. Measured here rather than assumed,
+# because the answer decides who a runaway build hurts: the first reading came
+# back as the cgroup-v1 "no limit" sentinel, which means nothing caps this job
+# and an over-parallel ninja competes for the node's physical memory with
+# whatever else is running on it.
+MEM_LIMIT="$(cat /sys/fs/cgroup/memory.max 2>/dev/null \
+    || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null \
+    || echo unknown)"
+# 2^63 rounded down to a page boundary is how cgroup v1 spells "unlimited".
+[[ "${MEM_LIMIT}" == "9223372036854771712" ]] && MEM_LIMIT="unlimited"
+
+log "cpus    ${CPU_CORES} (Ray workers ${AGENTSOCIETY_LLM_RAY_MAX_WORKERS}, JIT jobs ${MAX_JOBS})"
+log "memory  ${MEM_LIMIT} (cgroup limit)"
+log "batch   ${BATCH_SIZE} agents per task, ${RAY_TASKS} task(s) per tick"
 log "gpus    ${GPU_COUNT} (data parallel size ${DP_SIZE})"
 
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
@@ -109,6 +141,7 @@ log "running the simulation"
     --config "${RUN_DIR}/init_config.json" \
     --steps "${RUN_DIR}/steps.yaml" \
     --run-dir "${RUN_DIR}" \
+    --batch-size "${BATCH_SIZE}" \
     --log-level "${AGENTSOCIETY_LOG_LEVEL:-INFO}" \
     2>&1 | tee "${RUN_DIR}/sim.log"
 

@@ -228,6 +228,35 @@ detect_cpu_cores() {
     fi
 }
 
+# @description Agents per step_agent_batch Ray Task, sized to fill the workers.
+# @description
+#   Upstream chunks the agent list every tick and submits ceil(N / BATCH_SIZE)
+#   Ray Tasks, of which at most AGENTSOCIETY_LLM_RAY_MAX_WORKERS run at once.
+#   Its default batch of 256 is therefore a trap at this scale: every
+#   population this repository has run -- 4, 16, 128, 256 agents -- produced a
+#   single task, so one process held the only AIMD semaphore and neither more
+#   agents nor more workers could raise the concurrent request count. Upstream
+#   states the rule in config.py: "choose a size where ceil(N / BATCH_SIZE) >=
+#   LLM_RAY_MAX_WORKERS to saturate the workers; otherwise some workers sit
+#   idle."
+#
+#   Dividing down rather than up is what makes that inequality hold. Rounding
+#   up gives ceil(17 / ceil(17/8)) = 6 tasks for 8 workers; rounding down gives
+#   9, which fills them. A population smaller than the worker count cannot fill
+#   them at all, and clamps to one agent per task.
+# @arg $1 int Agent count; 0 means the count is left to the config.
+# @arg $2 int Concurrent worker count.
+# @stdout Batch size.
+ray_batch_size() {
+    local agents="$1" workers="$2" size
+    # No population to split: upstream's own default is the only honest answer.
+    (( agents > 0 )) || { echo 256; return; }
+    (( workers > 0 )) || workers=1
+    size=$(( agents / workers ))
+    (( size > 0 )) || size=1
+    echo "${size}"
+}
+
 # --- Source tree ------------------------------------------------------------
 
 # @description Refuse to ship a checkout that is behind its upstream.
