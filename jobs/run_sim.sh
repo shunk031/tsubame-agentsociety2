@@ -23,7 +23,6 @@
 #$ -V
 #$ -N as2-sim
 #$ -j y
-#$ -l gpu_1=1
 #$ -l h_rt=1:00:00
 
 set -euo pipefail

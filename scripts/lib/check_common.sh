@@ -470,6 +470,45 @@ assert_batch_size 0 8 256
     exit 1
 ) || failures=$((failures + 1))
 
+# Grid Engine combines an embedded "#$ -l" with the one on the command line
+# instead of letting the caller win, so a job script that hardcodes gpu_1=1 can
+# never be submitted to a whole node: "Job is rejected because multiple
+# specifying of node_? and cpu(or gpu)". run_sim.sh's own usage example showed
+# -l node_f=1 and had therefore never worked.
+(
+    job="${SCRIPT_DIR}/../../jobs/run_sim.sh"
+    if grep -q '^#\$ -l gpu_1=' "${job}"; then
+        printf 'FAIL %-34s run_sim.sh hardcodes a GPU resource\n' "gpu resource"
+        exit 1
+    fi
+    printf 'ok   %-34s chosen at submit time\n' "gpu resource"
+) || failures=$((failures + 1))
+
+# @description Assert which GPU resource submit.sh would request.
+# @arg $1 string Expected resource, or "" when the caller supplies its own.
+# @arg $@ string Arguments the caller passes to submit.sh.
+assert_gpu_default() {
+    local expected="$1"; shift
+    local rendered
+    rendered="$(
+        bash -c "source '${SCRIPT_DIR}/common.sh'; default_gpu_resource \"\$@\"" _ "$@"
+    )"
+    if [[ "${rendered}" == "${expected}" ]]; then
+        printf 'ok   %-34s %s\n' "gpu resource" "${expected:-caller supplied}"
+    else
+        printf 'FAIL %-34s got "%s", expected "%s"\n' "gpu resource" "${rendered}" "${expected}"
+        failures=$((failures + 1))
+    fi
+}
+# Nothing asked for: one GPU, which is what every run so far has used.
+assert_gpu_default "gpu_1=1"
+assert_gpu_default "gpu_1=1" -v FOO=bar
+# The caller named a resource, so submit.sh must not add a second one.
+assert_gpu_default "" -l node_f=1
+assert_gpu_default "" -l gpu_h=1
+assert_gpu_default "" -l h_rt=6:00:00 -l node_f=1
+# An unrelated -l must not be mistaken for a GPU request.
+assert_gpu_default "gpu_1=1" -l h_rt=6:00:00
 
 if [[ "${failures}" -gt 0 ]]; then
     printf '\n%d check(s) failed\n' "${failures}"

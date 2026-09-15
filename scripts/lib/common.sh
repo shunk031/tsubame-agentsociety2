@@ -94,6 +94,32 @@ else
     VLLM_PORT="${VLLM_PORT:-8000}"
 fi
 
+# --- Scheduler resources ----------------------------------------------------
+
+# @description Report the GPU resource submit.sh should add, if any.
+# @description
+#   Grid Engine merges an embedded "#$ -l" with the command line rather than
+#   letting the command line win, so a job script cannot both default to one
+#   GPU and be submittable to a whole node: asking for node_f alongside a
+#   hardcoded gpu_1 is rejected outright. The default therefore lives here,
+#   where it can stand aside when the caller names its own resource.
+# @arg $@ string The arguments submit.sh was given.
+# @stdout The resource to add, or nothing when the caller already chose one.
+default_gpu_resource() {
+    local arg want=0
+    for arg in "$@"; do
+        if [[ "${want}" -eq 1 ]]; then
+            # Only a GPU resource counts. An -l h_rt or -l m_mem_free says
+            # nothing about devices and must not suppress the default.
+            [[ "${arg}" == node_?=* ]] || [[ "${arg}" == gpu_*=* ]] && return 0
+            want=0
+            continue
+        fi
+        [[ "${arg}" == "-l" ]] && want=1
+    done
+    echo "gpu_1=1"
+}
+
 # --- GPU telemetry ----------------------------------------------------------
 
 # @description Sample GPU utilisation into the run directory until the job ends.
