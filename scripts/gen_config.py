@@ -111,6 +111,43 @@ ENVIRONMENTS = {
         ),
         "response_type": "integer",
     },
+    # The simultaneous-move games above and the psychology experiments in the
+    # same contrib package share a property that makes them poor fits for a
+    # large population: no tool takes another agent's id, so agents never
+    # address one another, and the round resolves only once every agent has
+    # submitted. Adding agents changes the arithmetic, not the structure, and
+    # the round costs whatever the slowest single agent costs.
+    #
+    # SocialMediaSpace is the opposite on both counts. Nine of its eleven tools
+    # take another agent's id, and nothing waits for a round boundary, so the
+    # population is the environment rather than a divisor.
+    "SocialMediaSpace": {
+        "default_agents": 32,
+        "role": (
+            "You are one of {n} others on a social network, and it is the only "
+            "thing you do: no job, no home, no errands. On every step, before "
+            "anything else, use ask_env exactly twice, in this order. First, "
+            "send this instruction word for word: \"refresh the feed using "
+            "user_id from ctx['variables']\", with user_id set to your own id. "
+            "Read what came back. Then send this instruction word for word: "
+            "\"create a post using author_id and content from "
+            "ctx['variables']\", with author_id set to your own id and content "
+            "set to what you want to say. Write content that replies to "
+            "something you just read, naming the person you are replying to, "
+            "unless the feed came back empty — then write whatever is on your "
+            "mind. Your id is the number in your profile, copied exactly as it "
+            "appears there."
+        ),
+        # The environment reads feed_source and polarization_mode from kwargs;
+        # the defaults ("global", "none") are the neutral setting, so a first
+        # study measures interaction rather than an imposed structure.
+        "env_kwargs": lambda n, args: {},
+        "question": (
+            "How many posts have you written so far? Answer with the number "
+            "only, and answer 0 if you have written none."
+        ),
+        "response_type": "integer",
+    },
     "SimpleSocialSpace": {
         "default_agents": 8,
         "role": (
@@ -169,7 +206,11 @@ def build_agents(num_agents: int, seed: int, role: str) -> list[dict]:
 
 def build_init_config(agents: list[dict], env_module: str, env_kwargs: dict) -> dict:
     """Wrap agents in the chosen environment module."""
-    if env_module == "SimpleSocialSpace":
+    # Both environments key on an explicit agent-to-identity mapping. Without
+    # one SocialMediaSpace auto-creates a user for whatever id it is handed, so
+    # an id the model invented becomes a silent extra participant; with one, the
+    # same id raises instead.
+    if env_module in ("SimpleSocialSpace", "SocialMediaSpace"):
         env_kwargs = {
             "agent_id_name_pairs": [
                 [agent["agent_id"], agent["kwargs"]["name"]] for agent in agents

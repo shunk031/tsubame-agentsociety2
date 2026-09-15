@@ -29,7 +29,14 @@ command -v uv >/dev/null 2>&1 || die "uv not found; run 01_install_uv.sh first"
 mkdir -p "${WORK_ROOT}" "${HF_HOME}" "${RUNS_DIR}"
 
 log "syncing ${REPO_ROOT} into ${VENV}"
-uv sync --locked --project "${REPO_ROOT}"
+# --reinstall-package is not belt and braces. agentsociety2 comes from
+# vendor/AgentSociety as a path dependency, and uv.lock records only
+# `source = { directory = ... }` -- no digest of the directory's contents. So
+# `uv sync --locked` treats the package as satisfied however the source
+# changed, reuses the wheel it built the first time, and reports success in
+# seconds. A patched module then never reaches site-packages, the run looks
+# ordinary, and the measurement is of code nobody meant to test.
+uv sync --locked --project "${REPO_ROOT}" --reinstall-package agentsociety2
 
 log "verifying the installation"
 "${VENV}/bin/python" - <<'PY'

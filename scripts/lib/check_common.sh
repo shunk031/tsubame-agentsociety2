@@ -510,6 +510,22 @@ assert_gpu_default "" -l h_rt=6:00:00 -l node_f=1
 # An unrelated -l must not be mistaken for a GPU request.
 assert_gpu_default "gpu_1=1" -l h_rt=6:00:00
 
+# uv.lock records a path dependency as `source = { directory = ... }` with no
+# digest of what is in that directory, so `uv sync --locked` considers the
+# vendored package satisfied no matter how its source changed and reuses the
+# wheel it built the first time. The sync then reports success in seconds and
+# the environment silently keeps the old code -- twice in one day a measurement
+# was taken against a patch the venv did not contain.
+(
+    setup="${SCRIPT_DIR}/../setup/02_sync_env.sh"
+    if grep -q -- '--reinstall-package agentsociety2' "${setup}"; then
+        printf 'ok   %-34s vendored package rebuilt every sync\n' "env sync"
+        exit 0
+    fi
+    printf 'FAIL %-34s uv sync will reuse a stale vendored build\n' "env sync"
+    exit 1
+) || failures=$((failures + 1))
+
 if [[ "${failures}" -gt 0 ]]; then
     printf '\n%d check(s) failed\n' "${failures}"
     exit 1
