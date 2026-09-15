@@ -162,12 +162,67 @@ def test_role_never_names_an_environment_tool():
     """Naming one makes the agent try it as a ReAct action and give up.
 
     "Unknown tool: submit_extraction" — cause 3 in PR #1. The environment is
-    reached through ask_env in plain words.
+    reached through ask_env in plain words. Every module's own tool names are
+    checked, not only the first module's: a role that named a tool belonging to
+    its own environment would otherwise slip through.
     """
+    tools = (
+        "submit_extraction",
+        "get_pool_resources",
+        "get_round_history",
+        "send_message",
+        "receive_messages",
+        "create_post",
+        "refresh_feed",
+        "like_post",
+        "follow_user",
+        "comment_on_post",
+        "observe_user",
+    )
     for env_module in gen_config.ENVIRONMENTS:
         role = role_for(env_module, num_agents=4)
-        for tool in ("submit_extraction", "get_pool_resources", "get_round_history"):
-            assert tool not in role
+        for tool in tools:
+            assert tool not in role, f"{env_module} names {tool}"
+
+
+def test_social_media_role_makes_agents_read_before_they_write():
+    """A population that only posts never interacts.
+
+    The reason to prefer this environment over the simultaneous-move games is
+    that agents address each other. That only happens if each step reads what
+    others wrote before producing anything, so the role has to ask for both,
+    in that order.
+    """
+    role = role_for("SocialMediaSpace", num_agents=128)
+
+    feed = role.index("feed")
+    post = role.index("post")
+    assert feed < post, "the role writes before it reads"
+    assert "twice" in role
+
+
+def test_social_media_role_carries_the_ids_the_environment_keys_on():
+    role = role_for("SocialMediaSpace", num_agents=128)
+
+    assert "user_id" in role
+    assert "author_id" in role
+    assert "ctx['variables']" in role
+
+
+def test_social_media_binds_agents_to_their_environment_identities():
+    """Unmapped ids are rejected by the environment, not silently created.
+
+    SocialMediaSpace only auto-creates a user when no explicit mapping was
+    given; with one, an id outside the set raises. Passing the mapping is what
+    turns a hallucinated id into a loud failure instead of a phantom
+    participant.
+    """
+    agents = gen_config.build_agents(4, seed=42, role="r")
+    config = gen_config.build_init_config(agents, "SocialMediaSpace", {})
+
+    pairs = config["env_modules"][0]["kwargs"]["agent_id_name_pairs"]
+    assert [p[0] for p in pairs] == [a["agent_id"] for a in agents]
+    assert [p[1] for p in pairs] == [a["kwargs"]["name"] for a in agents]
 
 
 def test_role_reaches_every_agent_profile():
