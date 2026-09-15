@@ -922,6 +922,208 @@ QSTAT
     exit "${local_failures}"
 ) || failures=$((failures + $?))
 
+# --- environment provenance -------------------------------------------------
+
+# @description Build a repository and a matching environment under one directory.
+# @description
+#   Real directories rather than canned digests: what fails in practice is the
+#   walk over the trees -- which files are counted, which are skipped -- and a
+#   fixture of strings would only test the string handling.
+#
+#   The environment holds a copy of the vendored package, which is what uv does
+#   for a path dependency (nothing is installed editable, so patching the source
+#   after a build does not reach the environment). tests/ exists in the vendored
+#   package and not in the environment, because hatchling does not ship it.
+# @arg $1 path Directory to build under.
+make_provenance_fixture() {
+    local base="$1"
+    local repo="${base}/repo" venv="${base}/venv" package site
+
+    package="${repo}/vendor/AgentSociety/packages/agentsociety2"
+    site="${venv}/lib/python3.12/site-packages/agentsociety2"
+
+    mkdir -p "${package}/agentsociety2/society" "${package}/tests" "${site}/society"
+
+    printf 'version = 1\n' >"${repo}/uv.lock"
+    printf '[project]\nname = "fixture"\n' >"${repo}/pyproject.toml"
+    printf '[project]\nname = "agentsociety2"\nversion = "2.8.7"\n' >"${package}/pyproject.toml"
+    printf '__version__ = "2.8.7"\n' >"${package}/agentsociety2/__init__.py"
+    printf 'ROUTER = "react"\n' >"${package}/agentsociety2/society/cli.py"
+    printf 'def test_nothing():\n    pass\n' >"${package}/tests/test_nothing.py"
+
+    cp "${package}/agentsociety2/__init__.py" "${site}/__init__.py"
+    cp "${package}/agentsociety2/society/cli.py" "${site}/society/cli.py"
+
+    bash -c "source '${SCRIPT_DIR}/common.sh'; write_env_provenance '${venv}' '${repo}'" 2>/dev/null
+}
+
+# @description Run assert_env_matches_source over a fixture and judge the result.
+# @arg $1 string Label for the output line.
+# @arg $2 path Fixture environment.
+# @arg $3 path Fixture repository.
+# @arg $4 string Expected outcome: "pass", "warn" or "fail".
+# @arg $5 string Substring the message must contain. Empty to skip the check.
+# @arg $6 string Extra environment assignments, e.g. ENV_ALLOW_MISMATCH=1.
+# @exitcode 1 The outcome or the message was not the expected one.
+assert_provenance() {
+    local label="$1" venv="$2" repo="$3" outcome="$4" needle="$5" env_prefix="${6:-}"
+    local output reached=0
+
+    # Intentional word splitting: the caller passes VAR=value assignments.
+    # shellcheck disable=SC2086
+    output="$(
+        env ${env_prefix} bash -c \
+            "source '${SCRIPT_DIR}/common.sh'; assert_env_matches_source '${venv}' '${repo}'; echo REACHED" 2>&1
+    )"
+    [[ "${output}" == *REACHED* ]] && reached=1
+
+    case "${outcome}" in
+        pass) [[ "${reached}" -eq 1 ]] && [[ "${output}" != *WARNING* ]] || { printf 'FAIL %-34s did not pass cleanly: %s\n' "${label}" "${output}"; return 1; } ;;
+        warn) [[ "${reached}" -eq 1 ]] && [[ "${output}" == *WARNING* ]] || { printf 'FAIL %-34s did not warn and continue: %s\n' "${label}" "${output}"; return 1; } ;;
+        fail) [[ "${reached}" -eq 0 ]] || { printf 'FAIL %-34s ran anyway: %s\n' "${label}" "${output}"; return 1; } ;;
+        *) printf 'FAIL %-34s unknown expectation %s\n' "${label}" "${outcome}"; return 1 ;;
+    esac
+
+    if [[ -n "${needle}" ]] && [[ "${output}" != *"${needle}"* ]]; then
+        printf 'FAIL %-34s message lacks "%s": %s\n' "${label}" "${needle}" "${output}"
+        return 1
+    fi
+
+    printf 'ok   %-34s %s\n' "${label}" "${outcome}"
+}
+
+(
+    fixture="$(mktemp -d)"
+    trap 'rm -rf "${fixture}"' EXIT
+    local_failures=0
+
+    make_provenance_fixture "${fixture}"
+    repo="${fixture}/repo"
+    venv="${fixture}/venv"
+    package="${repo}/vendor/AgentSociety/packages/agentsociety2"
+    site="${venv}/lib/python3.12/site-packages/agentsociety2"
+
+    # A freshly built environment matches the tree it was built from. Everything
+    # below is a departure from this state.
+    assert_provenance "provenance" "${venv}" "${repo}" pass "matches" || local_failures=$((local_failures + 1))
+
+    # The version number does not move when the vendored source is patched, so
+    # this is the case no version check can see. It is also the one that
+    # produced a measurement of a patch that was never installed.
+    cp "${package}/agentsociety2/society/cli.py" "${fixture}/cli.py.orig"
+    printf 'ROUTER = "patched"\n' >"${package}/agentsociety2/society/cli.py"
+    assert_provenance "provenance patched source" "${venv}" "${repo}" fail "differing in vendor" || local_failures=$((local_failures + 1))
+
+    # ... and the escape hatch says so in the log rather than in someone's head.
+    assert_provenance "provenance opt-out" "${venv}" "${repo}" warn "ENV_ALLOW_MISMATCH" ENV_ALLOW_MISMATCH=1 || local_failures=$((local_failures + 1))
+    cp "${fixture}/cli.py.orig" "${package}/agentsociety2/society/cli.py"
+
+    # Named components, so the message distinguishes a relocked dependency from
+    # a patched one.
+    printf 'version = 2\n' >"${repo}/uv.lock"
+    assert_provenance "provenance relocked" "${venv}" "${repo}" fail "differing in lock" || local_failures=$((local_failures + 1))
+    printf 'version = 1\n' >"${repo}/uv.lock"
+
+    printf '[project]\nname = "agentsociety2"\nversion = "2.8.8"\n' >"${package}/pyproject.toml"
+    assert_provenance "provenance vendored metadata" "${venv}" "${repo}" fail "differing in vendor_project" || local_failures=$((local_failures + 1))
+    printf '[project]\nname = "agentsociety2"\nversion = "2.8.7"\n' >"${package}/pyproject.toml"
+
+    # The environment itself is re-derived rather than taken on trust, so an
+    # environment that was edited or half-deleted after its build is caught too.
+    printf 'ROUTER = "edited in place"\n' >"${site}/society/cli.py"
+    assert_provenance "provenance edited env" "${venv}" "${repo}" fail "no longer holds what its own build produced" || local_failures=$((local_failures + 1))
+    cp "${package}/agentsociety2/society/cli.py" "${site}/society/cli.py"
+
+    # A build that was killed partway leaves an environment that still imports.
+    # The stamp is removed before a build and written after the import check, so
+    # its absence is what that case looks like from here.
+    mv "${venv}/.source-provenance" "${fixture}/stamp"
+    assert_provenance "provenance unstamped env" "${venv}" "${repo}" fail "records no provenance" || local_failures=$((local_failures + 1))
+    mv "${fixture}/stamp" "${venv}/.source-provenance"
+
+    # Byte-compiled files are written by whoever imports the code first -- the
+    # vendored tree by a local run, site-packages by the first job. Counting
+    # them would make a stamp stop matching itself.
+    mkdir -p "${site}/society/__pycache__" "${package}/agentsociety2/__pycache__"
+    printf 'not really bytecode\n' >"${site}/society/__pycache__/cli.cpython-312.pyc"
+    printf 'not really bytecode\n' >"${package}/agentsociety2/__pycache__/__init__.cpython-314.pyc"
+    assert_provenance "provenance bytecode" "${venv}" "${repo}" pass "matches" || local_failures=$((local_failures + 1))
+
+    # docs/, tests/ and examples/ live in the vendored package and never reach
+    # the environment. A guard that fires on those gets switched off.
+    printf 'def test_nothing():\n    assert True\n' >"${package}/tests/test_nothing.py"
+    assert_provenance "provenance vendored tests" "${venv}" "${repo}" pass "matches" || local_failures=$((local_failures + 1))
+
+    # An unpopulated submodule is an empty directory, which would otherwise
+    # digest as a valid empty tree and match another empty one.
+    mv "${package}/agentsociety2" "${fixture}/pkg"
+    mkdir -p "${package}/agentsociety2"
+    assert_provenance "provenance empty submodule" "${venv}" "${repo}" fail "no agentsociety2 package under" || local_failures=$((local_failures + 1))
+    rmdir "${package}/agentsociety2"
+    mv "${fixture}/pkg" "${package}/agentsociety2"
+
+    # The digest has to describe content and not location: the same tree is read
+    # from a checkout here, from the login node's copy and from site-packages.
+    cp -r "${repo}" "${fixture}/elsewhere"
+    here="$(bash -c "source '${SCRIPT_DIR}/common.sh'; source_fingerprint '${repo}'")"
+    there="$(bash -c "source '${SCRIPT_DIR}/common.sh'; source_fingerprint '${fixture}/elsewhere'")"
+    if [[ -n "${here}" ]] && [[ "${here}" == "${there}" ]]; then
+        printf 'ok   %-34s same tree, two paths, one digest\n' "provenance location"
+    else
+        printf 'FAIL %-34s %s vs %s\n' "provenance location" "${here}" "${there}"
+        local_failures=$((local_failures + 1))
+    fi
+
+    exit "${local_failures}"
+) || failures=$((failures + $?))
+
+# The stamp only means anything if the build maintains it: removed before the
+# install so an interrupted build leaves no claim, written after the import
+# check so it is never a claim about an environment nobody verified.
+(
+    setup="${SCRIPT_DIR}/../setup/02_sync_env.sh"
+    missing=0
+    # Literal text the build script must contain, not an expansion.
+    # shellcheck disable=SC2016
+    clear='rm -f "${VENV}/${ENV_PROVENANCE_NAME}"'
+
+    # @description Line number of the first match. Empty when there is none --
+    #   deliberately not 0, which would compare as "before everything" and let a
+    #   missing line pass the ordering test below.
+    # @arg $1 string Fixed string to look for.
+    line_of() { grep -nF -m1 "$1" "${setup}" | cut -d: -f1; }
+
+    cleared="$(line_of "${clear}")"
+    installed="$(line_of 'uv sync --locked')"
+    stamped="$(line_of 'write_env_provenance')"
+
+    for line in "${cleared}" "${installed}" "${stamped}"; do
+        [[ "${line}" =~ ^[0-9]+$ ]] || missing=1
+    done
+    # Order is the whole point: clearing after the install, or stamping before
+    # the import check, would let an unfinished build keep a usable-looking
+    # claim.
+    [[ "${missing}" -eq 1 ]] || [[ "${cleared}" -lt "${installed}" ]] || missing=1
+    [[ "${missing}" -eq 1 ]] || [[ "${installed}" -lt "${stamped}" ]] || missing=1
+    if [[ "${missing}" -eq 0 ]]; then
+        printf 'ok   %-34s 02_sync_env.sh clears then writes the stamp\n' "provenance build"
+        exit 0
+    fi
+    printf 'FAIL %-34s 02_sync_env.sh does not maintain the stamp\n' "provenance build"
+    exit 1
+) || failures=$((failures + 1))
+
+# A guard nothing calls is a guard that does not exist, and both jobs run out of
+# the environment this check describes.
+for job in run_sim smoke; do
+    if grep -q 'assert_env_matches_source' "${SCRIPT_DIR}/../../jobs/${job}.sh"; then
+        printf 'ok   %-34s jobs/%s.sh checks its environment\n' "provenance job" "${job}"
+    else
+        printf 'FAIL %-34s jobs/%s.sh does not check its environment\n' "provenance job" "${job}"
+        failures=$((failures + 1))
+    fi
+done
+
 if [[ "${failures}" -gt 0 ]]; then
     printf '\n%d check(s) failed\n' "${failures}"
     exit 1
