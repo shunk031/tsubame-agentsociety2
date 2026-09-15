@@ -94,6 +94,31 @@ else
     VLLM_PORT="${VLLM_PORT:-8000}"
 fi
 
+# --- TensorRT-LLM kernel cache ----------------------------------------------
+
+# On SM90+ the FP8 MoE path defaults to a TensorRT-LLM block-scale GEMM that is
+# JIT-compiled at startup: nvcc writes a cubin under <cache>/tmp/<shape>/ and it
+# is renamed into <cache>/cache/<shape>/. The cache directory defaults to
+# $HOME/.tensorrt_llm, which is shared by every job this account runs, and the
+# rename is not safe against a second job compiling the same shape. Four 35B
+# jobs submitted together all died on the identical shape at the same moment,
+# the rename failing with ENOENT, which reaches the log only as
+# "Assertion failed: !cubin.empty() || isPathValid(path_)".
+#
+# Two independent guards, because either alone leaves a hole. Switching the
+# path off is what actually unblocks FP8 MoE today -- it costs the small-batch
+# TRT-LLM optimisation and saves a multi-minute DeepGEMM warmup -- but it does
+# not protect any other deep_gemm kernel that may reach the same cache. Giving
+# each job its own cache directory does that, and costs nothing while the path
+# above stays off, since nothing is compiled into it.
+#
+# Grid Engine gives every job a private TMPDIR on node-local storage and removes
+# it at exit, which is what a per-job compile cache wants; RAY_TMPDIR already
+# relies on the same guarantee. RUN_DIR would be wrong here -- the job scripts
+# define it after sourcing this file, so it is still unset at this point.
+export VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER="${VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER:-0}"
+export TRTLLM_DG_CACHE_DIR="${TRTLLM_DG_CACHE_DIR:-${TMPDIR:-/tmp}/trtllm-cache-${JOB_ID:-local}}"
+
 # --- Embedding --------------------------------------------------------------
 
 # Every ask_env misses the code-generation template cache without one. The
