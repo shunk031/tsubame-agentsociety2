@@ -458,7 +458,7 @@ assert_batch_size 0 8 256
     # each install a bare `trap ... EXIT` that overwrites any other handler, so
     # the only place the sampler can be torn down is inside those handlers.
     for handler in stop_vllm stop_all_vllm; do
-        awk -v fn="^${handler}\\(\\)" '
+        awk -v fn="^${handler}[(]" '
             $0 ~ fn {inside=1} inside && /stop_gpu_sampler/ {found=1} inside && /^}/ {exit}
             END {exit !found}' "${SCRIPT_DIR}/common.sh" || missing=1
     done
