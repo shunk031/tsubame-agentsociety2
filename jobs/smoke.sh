@@ -40,8 +40,10 @@ set -euo pipefail
 # Grid Engine runs a spooled copy of this file under /var/spool/age/<node>/, so
 # BASH_SOURCE points somewhere with no repository around it. SGE_O_WORKDIR holds
 # the directory the job was submitted from, which `#$ -cwd` also makes the
-# working directory. The BASH_SOURCE fallback is for running this script
-# directly from an interactive iqrsh session.
+# working directory -- which scripts/submit.sh makes this submission's source
+# snapshot, and which it also passes explicitly as REPO_ROOT. The BASH_SOURCE
+# fallback is for running this script directly from an interactive iqrsh
+# session.
 REPO_ROOT="${REPO_ROOT:-${SGE_O_WORKDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
 # shellcheck source=../scripts/lib/common.sh
 source "${REPO_ROOT}/scripts/lib/common.sh"
@@ -51,6 +53,7 @@ mkdir -p "${RUN_DIR}"
 
 log "host    $(hostname)"
 log "job     ${JOB_ID:-<interactive>}"
+log_source_snapshot
 log "run dir ${RUN_DIR}"
 log "model   ${MODEL}"
 

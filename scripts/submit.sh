@@ -14,6 +14,11 @@
 #   prior queue otherwise. Note that reservations here only admit `node_f`, so a
 #   single-GPU smoke run has to go to the prior queue.
 #
+#   The sync makes a snapshot of its own for this submission and the job is
+#   pinned to it, so what a queued job will run stops changing the moment this
+#   returns. Grid Engine's output file goes to RUNS_DIR rather than the job's
+#   working directory, which is now that snapshot and is meant to be prunable.
+#
 # @arg $1 string Job script, relative to the repository root.
 # @arg $@ string Further arguments are passed through to qsub.
 #
@@ -43,9 +48,8 @@ shift
 
 [[ -f "${REPO_ROOT}/${JOB_SCRIPT}" ]] || die "no such job script: ${JOB_SCRIPT}"
 
-REMOTE_REPO="${REMOTE_REPO:-tsubame-agentsociety2}"
-
-"${SCRIPT_DIR}/sync.sh"
+snapshot_dir="$("${SCRIPT_DIR}/sync.sh")"
+[[ -n "${snapshot_dir}" ]] || die "sync.sh reported no snapshot directory"
 
 qsub_args=(-g "${TSUBAME_GROUP}")
 if [[ -n "${AR_ID:-}" ]] && [[ -z "${NO_AR:-}" ]]; then
@@ -61,20 +65,41 @@ fi
 gpu_resource="$(default_gpu_resource "$@")"
 [[ -n "${gpu_resource}" ]] && qsub_args+=(-l "${gpu_resource}")
 
+# Grid Engine opens `<job name>.o<job id>` in the job's working directory, which
+# `#$ -cwd` makes the snapshot. Keeping it there would tie the log's lifetime to
+# a directory that exists to be pruned. A trailing slash asks Grid Engine for
+# that same default filename inside RUNS_DIR instead, next to the run's own
+# vllm.log and sim.log. Passed before "$@" so an explicit -o still wins.
+qsub_args+=(-o "${RUNS_DIR}/")
 qsub_args+=("$@" "${JOB_SCRIPT}")
 
-# REMOTE_REPO and the qsub arguments are expanded here on purpose: the remote
-# side just runs the finished command line.
+# Two independent things point the job at its snapshot, and they agree:
+#
+#   cd        makes the snapshot SGE_O_WORKDIR, which `#$ -cwd` turns into the
+#             job's working directory and which jobs/*.sh fall back to.
+#   REPO_ROOT is exported into qsub's environment, and `#$ -V` carries it to the
+#             job, which prefers an explicit REPO_ROOT over the fallback.
+#
+# The explicit variable is not passed with `-v`. Callers already spend `-v` on
+# MODEL and friends, and whether Altair Grid Engine merges repeated `-v` options
+# or lets the last one win is not something this repository can check without
+# submitting a job. `-V` has no such ambiguity and is already relied on.
+#
+# The arguments are expanded here on purpose: the remote side just runs the
+# finished command line.
 # shellcheck disable=SC2029
 submission="$(
     ssh "${TSUBAME_USER}@${TSUBAME_LOGIN_HOST}" \
-        "cd ~/${REMOTE_REPO} && qsub $(printf '%q ' "${qsub_args[@]}")"
+        "cd $(printf '%q' "${snapshot_dir}") && REPO_ROOT=$(printf '%q' "${snapshot_dir}") qsub $(printf '%q ' "${qsub_args[@]}")"
 )"
 echo "${submission}"
 
 # "Your job 8634774 ("as2-smoke") has been submitted"
 job_id="$(printf '%s' "${submission}" | awk '{print $3; exit}')"
 [[ "${job_id}" =~ ^[0-9]+$ ]] || die "could not parse a job id from: ${submission}"
+
+log "job ${job_id} is pinned to snapshot $(basename "${snapshot_dir}")"
+log "its output will be ${RUNS_DIR}/<job name>.o${job_id}"
 
 if [[ -n "${NO_WATCH:-}" ]]; then
     log "submitted job ${job_id}; follow it with scripts/watch.sh ${job_id}"

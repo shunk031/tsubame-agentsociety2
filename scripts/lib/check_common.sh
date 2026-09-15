@@ -526,6 +526,402 @@ assert_gpu_default "gpu_1=1" -l h_rt=6:00:00
     exit 1
 ) || failures=$((failures + 1))
 
+# --- source snapshots -------------------------------------------------------
+
+# A submission's source is copied into a directory of its own, and the job is
+# pinned to that copy. What follows checks the three things that has to be true
+# of: the copies land on the group area, two submissions never pick the same
+# one, and an existing copy does not change when the next submission runs.
+#
+# None of these print WORK_ROOT or anything derived from it. This output gets
+# pasted into issues.
+
+(
+    read -r work src runs <<<"$(
+        bash -c "source '${SCRIPT_DIR}/common.sh'; printf '%s %s %s' \"\${WORK_ROOT}\" \"\${SRC_ROOT}\" \"\${RUNS_DIR}\""
+    )"
+
+    local_failures=0
+
+    # Snapshots grow with every submission. Home is a shared quota; the group
+    # area is what WORK_ROOT exists to name.
+    if [[ -n "${src}" ]] && [[ "${src}" == "${work}/"* ]]; then
+        printf 'ok   %-34s under the group area\n' "snapshot root"
+    else
+        printf 'FAIL %-34s not under the group area\n' "snapshot root"
+        local_failures=$((local_failures + 1))
+    fi
+
+    if [[ "${src}" != "${HOME}/"* ]]; then
+        printf 'ok   %-34s not on home\n' "snapshot root"
+    else
+        printf 'FAIL %-34s on home, which is a shared quota\n' "snapshot root"
+        local_failures=$((local_failures + 1))
+    fi
+
+    # Grid Engine's own output file is directed here at submit time, so it
+    # outlives the snapshot the job ran from.
+    if [[ -n "${runs}" ]] && [[ "${runs}" != "${src}"* ]]; then
+        printf 'ok   %-34s separate from the snapshot root\n' "run output"
+    else
+        printf 'FAIL %-34s inside the snapshot root; pruning would take the logs\n' "run output"
+        local_failures=$((local_failures + 1))
+    fi
+
+    exit "${local_failures}"
+) || failures=$((failures + $?))
+
+# Two submit.sh processes started in the same second must not pick the same
+# directory. That is the whole isolation guarantee, so test it in bulk rather
+# than by generating two ids and hoping.
+(
+    ids="$(
+        bash -c "source '${SCRIPT_DIR}/common.sh'; for _ in \$(seq 200); do new_snapshot_id; echo; done"
+    )"
+    total="$(printf '%s\n' "${ids}" | wc -l)"
+    unique="$(printf '%s\n' "${ids}" | sort -u | wc -l)"
+
+    local_failures=0
+
+    if [[ "${total}" -eq 200 ]] && [[ "${unique}" -eq 200 ]]; then
+        printf 'ok   %-34s 200 ids, 200 distinct\n' "snapshot id"
+    else
+        printf 'FAIL %-34s %s ids, only %s distinct\n' "snapshot id" "${total}" "${unique}"
+        local_failures=$((local_failures + 1))
+    fi
+
+    # scripts/snapshots.sh decides which snapshots are newest by sorting these
+    # names, and a person reads the commit out of them. Both depend on the shape.
+    first="$(printf '%s\n' "${ids}" | head -1)"
+    if [[ "${first}" =~ ^[0-9]{8}T[0-9]{6}Z-([0-9a-f]{7}|nogit)-[0-9a-f]{6}$ ]]; then
+        printf 'ok   %-34s <utc>-<commit>-<random>\n' "snapshot id"
+    else
+        printf 'FAIL %-34s unexpected shape: %s\n' "snapshot id" "${first}"
+        local_failures=$((local_failures + 1))
+    fi
+
+    exit "${local_failures}"
+) || failures=$((failures + $?))
+
+# The rsync that fills a snapshot. --delete against a shared tree is what used
+# to erase a running job's output; a fresh directory per submission means there
+# is nothing to delete, and reintroducing it would mean the destination is
+# shared again.
+(
+    rendered="$(
+        SRC_ROOT=/tmp/check-src REMOTE_REPO=/tmp/check-src/current \
+            bash -c "source '${SCRIPT_DIR}/common.sh'; build_snapshot_rsync_args /tmp/check-src/snap; printf '%s\n' \"\${RSYNC_ARGS[*]}\""
+    )"
+
+    local_failures=0
+
+    if [[ "${rendered}" != *"--delete"* ]]; then
+        printf 'ok   %-34s no --delete\n' "snapshot rsync"
+    else
+        printf 'FAIL %-34s has --delete\n' "snapshot rsync"
+        local_failures=$((local_failures + 1))
+    fi
+
+    # Without this every submission re-sends ~250 MB and keeps another copy of
+    # it. The feature is affordability, not correctness, but losing it silently
+    # would make snapshots per submission untenable.
+    if [[ "${rendered}" == *"--link-dest=/tmp/check-src/current"* ]]; then
+        printf 'ok   %-34s hardlinks against the previous snapshot\n' "snapshot rsync"
+    else
+        printf 'FAIL %-34s no --link-dest: %s\n' "snapshot rsync" "${rendered}"
+        local_failures=$((local_failures + 1))
+    fi
+
+    exit "${local_failures}"
+) || failures=$((failures + $?))
+
+# The property itself, with a real rsync into a real directory: a snapshot does
+# not change when the next submission runs. This is the failure that started it
+# -- a sync from another branch between submission and start, and ten jobs
+# running a commit nobody chose.
+(
+    fixture="$(mktemp -d)"
+    trap 'rm -rf "${fixture}"' EXIT
+
+    checkout="${fixture}/checkout"
+    mkdir -p "${checkout}/scripts"
+    printf 'first\n' >"${checkout}/scripts/gen_config.py"
+    printf 'unchanged\n' >"${checkout}/uv.lock"
+
+    export SRC_ROOT="${fixture}/src"
+    export REMOTE_REPO="${SRC_ROOT}/current"
+    mkdir -p "${SRC_ROOT}"
+
+    # Not source=common.sh: letting shellcheck inline it here pairs the
+    # ENABLE_THINKING export a few blocks up with the read inside
+    # build_vllm_args and reports a subshell-scope warning about neither.
+    # shellcheck source=/dev/null
+    source "${SCRIPT_DIR}/common.sh"
+
+    # The same sequence scripts/sync.sh runs, minus ssh: mint a name, create the
+    # directory, fill it, repoint current.
+    #
+    # `mkdir -p` here where sync.sh uses a bare `mkdir`, on purpose. sync.sh
+    # refuses a name that already exists and the block below asserts that it
+    # still does; letting the fixture reuse a directory instead is what makes a
+    # repeated name show up here as two submissions sharing one tree -- the
+    # thing these four assertions are about -- rather than as a mkdir error.
+    take_snapshot() {
+        local id dir
+        id="$(new_snapshot_id)"
+        dir="${SRC_ROOT}/${id}"
+        mkdir -p "${dir}" || return 1
+        build_snapshot_rsync_args "${dir}"
+        rsync "${RSYNC_ARGS[@]}" "${checkout}/" "${dir}/" || return 1
+        ln -sn "${dir}" "${SRC_ROOT}/.current.${id}" || return 1
+        mv -Tf "${SRC_ROOT}/.current.${id}" "${REMOTE_REPO}" || return 1
+        printf '%s' "${dir}"
+    }
+
+    local_failures=0
+
+    # A previous snapshot to link against, which is the steady state: only the
+    # very first submission into a fresh WORK_ROOT has none. That case is
+    # checked separately below, because rsync writes a warning about it and it
+    # would otherwise look like a failure in this block.
+    seed="${SRC_ROOT}/20250101T000000Z-0000000-000000"
+    mkdir -p "${seed}"
+    ln -sn "${seed}" "${REMOTE_REPO}"
+
+    submitted="$(take_snapshot)"
+
+    # rsync compares size and mtime at one-second granularity, so a rewrite in
+    # the same second as the previous one can be missed. That is rsync's
+    # behaviour, not this design's, but the fixture has to step past it or it
+    # would be testing the quick check instead of the isolation.
+    sleep 1.1
+    printf 'second, from another branch\n' >"${checkout}/scripts/gen_config.py"
+    later="$(take_snapshot)"
+
+    if [[ "$(cat "${submitted}/scripts/gen_config.py")" == "first" ]]; then
+        printf 'ok   %-34s a later sync leaves it alone\n' "snapshot isolation"
+    else
+        printf 'FAIL %-34s a later sync rewrote it\n' "snapshot isolation"
+        local_failures=$((local_failures + 1))
+    fi
+
+    if [[ "$(cat "${later}/scripts/gen_config.py")" == "second, from another branch" ]]; then
+        printf 'ok   %-34s the later sync got its own copy\n' "snapshot isolation"
+    else
+        printf 'FAIL %-34s the later sync did not land\n' "snapshot isolation"
+        local_failures=$((local_failures + 1))
+    fi
+
+    if [[ "${submitted}" != "${later}" ]]; then
+        printf 'ok   %-34s two syncs, two directories\n' "snapshot isolation"
+    else
+        printf 'FAIL %-34s both syncs wrote the same directory\n' "snapshot isolation"
+        local_failures=$((local_failures + 1))
+    fi
+
+    # Unchanged files share an inode, which is what keeps this affordable.
+    if [[ "$(stat -c %i "${submitted}/uv.lock")" == "$(stat -c %i "${later}/uv.lock")" ]]; then
+        printf 'ok   %-34s unchanged files are hardlinked\n' "snapshot isolation"
+    else
+        printf 'FAIL %-34s unchanged files were copied again\n' "snapshot isolation"
+        local_failures=$((local_failures + 1))
+    fi
+
+    # The first submission into a fresh WORK_ROOT has nothing to link against.
+    # rsync treats that as a warning; were it ever an error, the first sync
+    # after the group area is set up would fail and nothing else would say why.
+    if rsync -a --link-dest="${fixture}/never-existed" "${checkout}/" "${fixture}/cold/" 2>/dev/null; then
+        printf 'ok   %-34s a missing basis is not an error\n' "snapshot isolation"
+    else
+        printf 'FAIL %-34s a missing basis stopped the transfer\n' "snapshot isolation"
+        local_failures=$((local_failures + 1))
+    fi
+
+    exit "${local_failures}"
+) || failures=$((failures + $?))
+
+# Functions that isolate nothing unless the scripts call them. Assert the call
+# sites, the same way the per-run agent home is asserted above.
+(
+    sync_sh="${SCRIPT_DIR}/../sync.sh"
+    missing=0
+
+    grep -q 'new_snapshot_id' "${sync_sh}" || missing=1
+    grep -q 'build_snapshot_rsync_args' "${sync_sh}" || missing=1
+    # The transfer must go to the snapshot, not to a path shared between syncs.
+    # Literal, not an expansion: this is the text the script must contain.
+    # shellcheck disable=SC2016
+    grep -qF '"${remote}:${snapshot_dir}/"' "${sync_sh}" || missing=1
+    # `mkdir -p` would succeed on a directory that already exists, which is
+    # exactly the case that must fail.
+    # shellcheck disable=SC2016
+    grep -qF 'mkdir $(printf '"'"'%q'"'"' "${snapshot_dir}")' "${sync_sh}" || missing=1
+
+    if [[ "${missing}" -eq 0 ]]; then
+        printf 'ok   %-34s sync.sh writes a fresh snapshot\n' "snapshot wiring"
+        exit 0
+    fi
+    printf 'FAIL %-34s sync.sh does not write a fresh snapshot\n' "snapshot wiring"
+    exit 1
+) || failures=$((failures + 1))
+
+(
+    submit_sh="${SCRIPT_DIR}/../submit.sh"
+    missing=0
+
+    # The job has to be pinned to the snapshot sync.sh just made, by both
+    # routes: the working directory and an explicit REPO_ROOT.
+    # shellcheck disable=SC2016
+    grep -qF 'cd $(printf '"'"'%q'"'"' "${snapshot_dir}")' "${submit_sh}" || missing=1
+    # shellcheck disable=SC2016
+    grep -qF 'REPO_ROOT=$(printf '"'"'%q'"'"' "${snapshot_dir}")' "${submit_sh}" || missing=1
+    # And its output has to outlive that snapshot.
+    # shellcheck disable=SC2016
+    grep -qF 'qsub_args+=(-o "${RUNS_DIR}/")' "${submit_sh}" || missing=1
+
+    if [[ "${missing}" -eq 0 ]]; then
+        printf 'ok   %-34s submit.sh pins the job to it\n' "snapshot wiring"
+        exit 0
+    fi
+    printf 'FAIL %-34s submit.sh does not pin the job to it\n' "snapshot wiring"
+    exit 1
+) || failures=$((failures + 1))
+
+(
+    watch_remote_sh="${SCRIPT_DIR}/../remote/watch_remote.sh"
+    # Grid Engine's output moved out of the submit directory. A watcher still
+    # looking in the old place finds nothing and says the job produced none.
+    # shellcheck disable=SC2016
+    if grep -qF 'for candidate in "${runs_dir}"/*."o${job_id}"' "${watch_remote_sh}"; then
+        printf 'ok   %-34s watch looks for it under RUNS_DIR\n' "job output"
+        exit 0
+    fi
+    printf 'FAIL %-34s watch does not look for it under RUNS_DIR\n' "job output"
+    exit 1
+) || failures=$((failures + 1))
+
+# On the login node the tree is normally reached through the `current` symlink,
+# which the next sync repoints. Resolving REPO_ROOT physically is what keeps a
+# `uv sync` that started in one snapshot from finishing in another -- the third
+# way this went wrong in practice.
+(
+    fixture="$(mktemp -d)"
+    trap 'rm -rf "${fixture}"' EXIT
+
+    repo="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
+    ln -s "${repo}" "${fixture}/current"
+
+    rendered="$(
+        REPO_ROOT="" \
+            bash -c "source '${fixture}/current/scripts/lib/common.sh'; printf '%s' \"\${REPO_ROOT}\""
+    )"
+
+    if [[ "${rendered}" == "${repo}" ]]; then
+        printf 'ok   %-34s resolves through a symlink\n' "repo root"
+        exit 0
+    fi
+    printf 'FAIL %-34s followed the symlink instead of resolving it\n' "repo root"
+    exit 1
+) || failures=$((failures + 1))
+
+# --- snapshot pruning -------------------------------------------------------
+
+# Snapshots accumulate, so there is a way to delete them; deleting the wrong one
+# takes the source out from under a job that has not started yet. Exercise the
+# remote script against a fixture with a stubbed qstat, since the decision it
+# makes is entirely about what qstat reports.
+(
+    fixture="$(mktemp -d)"
+    trap 'rm -rf "${fixture}"' EXIT
+
+    src_root="${fixture}/src"
+    mkdir -p "${src_root}" "${fixture}/bin"
+
+    names=(
+        20260101T000000Z-aaaaaaa-000001
+        20260102T000000Z-aaaaaaa-000002
+        20260103T000000Z-aaaaaaa-000003
+        20260104T000000Z-aaaaaaa-000004
+        20260105T000000Z-aaaaaaa-000005
+        20260106T000000Z-aaaaaaa-000006
+    )
+    for name in "${names[@]}"; do
+        mkdir -p "${src_root}/${name}"
+        printf 'id      %s\nbranch  main\ncommit  aaaaaaa\n' "${name}" >"${src_root}/${name}/.snapshot"
+    done
+
+    # The third is queued behind a job; the fourth is what `current` points at.
+    pinned="${src_root}/${names[2]}"
+    ln -sn "${src_root}/${names[3]}" "${src_root}/current"
+
+    cat >"${fixture}/bin/qstat" <<QSTAT
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-j" ]]; then
+    [[ "\${2:-}" == "9000001" ]] || exit 1
+    echo "job_number:                 9000001"
+    echo "sge_o_workdir:              ${pinned}"
+    exit 0
+fi
+cat <<'TABLE'
+job-ID  prior   name     user   state submit/start at     queue        slots
+---------------------------------------------------------------------------
+9000001 0.55500 as2-sim  someone r    09/15/2026 10:00:00 all.q@node    8
+TABLE
+QSTAT
+    chmod +x "${fixture}/bin/qstat"
+
+    remote_sh="${SCRIPT_DIR}/../remote/snapshots_remote.sh"
+    local_failures=0
+
+    # Reporting must not delete anything. Deleting a snapshot is a decision, so
+    # it takes a flag.
+    PATH="${fixture}/bin:${PATH}" bash "${remote_sh}" "${src_root}" 2 0 >/dev/null 2>&1
+    remaining="$(find "${src_root}" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+    if [[ "${remaining}" -eq 6 ]]; then
+        printf 'ok   %-34s reporting deletes nothing\n' "snapshot prune"
+    else
+        printf 'FAIL %-34s reporting removed %s of 6\n' "snapshot prune" "$((6 - remaining))"
+        local_failures=$((local_failures + 1))
+    fi
+
+    PATH="${fixture}/bin:${PATH}" bash "${remote_sh}" "${src_root}" 2 1 >/dev/null 2>&1
+
+    # Queued job, `current`, and the newest two survive; the two nothing needs
+    # go. Each is checked on its own, because "four directories left" would also
+    # be true if it had removed the wrong four.
+    check_state() {
+        local name="$1" want="$2" label="$3"
+        if [[ "${want}" == "present" && -d "${src_root}/${name}" ]] ||
+            [[ "${want}" == "gone" && ! -d "${src_root}/${name}" ]]; then
+            printf 'ok   %-34s %s\n' "snapshot prune" "${label}"
+            return 0
+        fi
+        printf 'FAIL %-34s %s\n' "snapshot prune" "${label}"
+        return 1
+    }
+
+    check_state "${names[2]}" present "kept the one a queued job is pinned to" || local_failures=$((local_failures + 1))
+    check_state "${names[3]}" present "kept the one current points at" || local_failures=$((local_failures + 1))
+    check_state "${names[5]}" present "kept the newest" || local_failures=$((local_failures + 1))
+    check_state "${names[0]}" gone "removed the oldest unused" || local_failures=$((local_failures + 1))
+    check_state "${names[1]}" gone "removed the second oldest unused" || local_failures=$((local_failures + 1))
+
+    # Without qstat there is no way to know what is queued, and guessing deletes
+    # the source of a job that has not started. An empty PATH is enough: the
+    # check runs before the script needs any other command.
+    bash_path="$(command -v bash)"
+    output="$(PATH="" "${bash_path}" "${remote_sh}" "${src_root}" 2 1 2>&1)"
+    status=$?
+    if [[ "${status}" -ne 0 ]] && [[ "${output}" == *"refusing to prune"* ]]; then
+        printf 'ok   %-34s refuses to prune without qstat\n' "snapshot prune"
+    else
+        printf 'FAIL %-34s pruned without qstat: status=%s %s\n' "snapshot prune" "${status}" "${output}"
+        local_failures=$((local_failures + 1))
+    fi
+
+    exit "${local_failures}"
+) || failures=$((failures + $?))
+
 if [[ "${failures}" -gt 0 ]]; then
     printf '\n%d check(s) failed\n' "${failures}"
     exit 1
