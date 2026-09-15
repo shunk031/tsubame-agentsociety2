@@ -15,7 +15,7 @@
 #   scripts/watch.sh 8634860 | scripts/redact.sh
 #
 # @example
-#   scripts/ssh.sh 'tail -50 "$REMOTE_REPO"/as2-sim.o8634860' | scripts/redact.sh
+#   scripts/ssh.sh 'tail -50 "$RUNS_DIR"/as2-sim.o8634860' | scripts/redact.sh
 
 set -euo pipefail
 

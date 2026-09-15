@@ -12,6 +12,7 @@ LLM バックエンドは同一ノードに立てた [vLLM](https://github.com/v
 
 ```
 scripts/submit.sh jobs/run_sim.sh
+  └─ $WORK_ROOT/src/<スナップショット>   ← 投入時に固定・以後書き換わらない
   └─ 計算ノード
      ├─ vLLM serve  127.0.0.1:8000   (全 GPU を data parallel で使用)
      └─ python -m agentsociety2.society.cli  →  http://127.0.0.1:8000/v1
@@ -61,6 +62,11 @@ scripts/ssh.sh 'bash "$REMOTE_REPO"/scripts/setup/02_sync_env.sh'
 scripts/ssh.sh 'bash "$REMOTE_REPO"/scripts/setup/03_download_models.sh'
 ```
 
+- `sync.sh` は毎回**新しいスナップショット**を `$WORK_ROOT/src/` に作り、そのパスを標準出力に出す
+- `$REMOTE_REPO` は最新スナップショットを指す `$WORK_ROOT/src/current`
+  - セットアップのように**人がいま走らせる**ものはここで動かす
+  - ジョブは通さない。sync のたびに向き先が変わるため（後述）
+
 | スクリプト              | 内容                                    |
 | ----------------------- | --------------------------------------- |
 | `01_install_uv.sh`      | uv を導入（既存なら何もしない）         |
@@ -107,6 +113,7 @@ vllm (新しい版)       → nvidia-cutlass-dsl → protobuf >=6.30.2
 scripts/submit.sh jobs/smoke.sh      # vLLM だけ検証
 scripts/submit.sh jobs/run_sim.sh    # シミュレーション本体
 scripts/watch.sh                     # 走っているジョブに合流
+scripts/snapshots.sh                 # ソーススナップショットを一覧
 ```
 
 - `submit.sh`: sync → qsub → ログ追尾を 1 コマンドで実行
@@ -122,6 +129,48 @@ scripts/watch.sh                     # 走っているジョブに合流
 scripts/submit.sh jobs/run_sim.sh -l node_f=1 -l h_rt=3:00:00 \
   -v MODEL=Qwen/Qwen3.6-35B-A3B-FP8,NUM_AGENTS=16,NUM_ROUNDS=10
 ```
+
+## ソーススナップショット
+
+投入ごとにソースを丸ごと写し、ジョブをその写しに固定する。
+**投入した瞬間に、そのジョブが走らせるコードは決まる**。後続の sync がどのブランチから
+来ようと届かない。並行して投入する相手がいても同じ。
+
+| 場所                          | 中身                                     |
+| ----------------------------- | ---------------------------------------- |
+| `$WORK_ROOT/src/<id>/`        | 1 回の投入ぶんのソース。以後書き換えない |
+| `$WORK_ROOT/src/<id>/.snapshot` | ブランチ・コミット・未コミット数・時刻 |
+| `$WORK_ROOT/src/current`      | 最新スナップショットへの symlink         |
+| `$WORK_ROOT/runs/`            | ラン出力**と** Grid Engine のジョブ出力  |
+
+- id は `<UTC 時刻>-<commit>-<乱数>`。時刻で並ぶので `sort` が新しい順になる
+- 直前のスナップショットに `--link-dest` で hardlink する
+  - 変わっていないファイルは転送も複製もしない。実体は ~250MB だが増分だけで済む
+  - 裏返しとして、**スナップショット内のファイルを直接書き換えてはいけない**。
+    追記すると同じ inode を共有する他のスナップショットも変わる。手元を直して sync する
+- ジョブは `current` を経由しない。投入時に解決済みの絶対パスを渡す
+- ジョブ開始時のログに `.snapshot` の中身が出る ➜ **どのコミットで走ったか**が後から分かる
+
+Grid Engine の `as2-sim.o<jobid>` は**投入元ディレクトリではなく `$WORK_ROOT/runs/`** に
+落ちる（`qsub -o`）。スナップショットは消す前提の置き場なので、ログの寿命をそこに
+縛らない。ラン自身の `vllm.log` / `sim.log` と並ぶ。
+
+```bash
+scripts/ssh.sh 'tail -50 "$RUNS_DIR"/as2-sim.o8634860' | scripts/redact.sh
+```
+
+スナップショットは投入のたびに増える。消すのは別コマンド・明示的に。
+
+```bash
+scripts/snapshots.sh              # 一覧。消さない
+scripts/snapshots.sh --prune      # 不要なものだけ消す
+scripts/snapshots.sh --prune --keep 10
+```
+
+- 消さないもの: **待ち・実行中のジョブが固定しているもの**・`current`・新しい方から `--keep` 本（既定 5）
+- 使用中かどうかは `qstat -j` の `sge_o_workdir` で判定する
+  - このリポジトリの帳簿ではなく Grid Engine に聞く ➜ 別チェックアウトから投入されたものも数える
+  - `qstat` が無い環境では prune を拒否する。分からないまま消すと待機中のジョブのソースが消える
 
 ## パラメータ
 
@@ -280,10 +329,22 @@ shellcheck -x -P SCRIPTDIR jobs/*.sh scripts/*.sh scripts/lib/*.sh \
 - ➜ 疎通チェックは thinking 有効時に 1024 トークン確保・`finish_reason` で切り分け
 - ➜ `MAX_MODEL_LEN` に余裕を持たせる。ただし KV キャッシュと引き換え
 
-**`rsync --delete` は実行中ジョブの出力を消す**
+**共有した 1 本のツリーに sync すると、待機中のジョブのコードが差し替わる**
 
-- Grid Engine は投入元ディレクトリに `*.o<jobid>` を書く。`.gitignore` は rsync に効かない
-- ➜ `scripts/sync.sh` が除外する。素の rsync を使わない
+投入から実行開始までは数分〜数十分ある。その間ツリーが 1 本しかないと、次の sync が
+**既に投入済みのジョブが読むコードを書き換える**。実際に 3 通りの壊れ方をした。
+
+- 投入と開始の間に別ブランチから sync ➜ 10 本のジョブが意図しないコミットで走った
+- 数分差で別ブランチから 2 回投入 ➜ 後の sync が先のコードを消し、先のジョブが
+  `gen_config.py: error: unrecognized arguments: --similarity-threshold` で落ちた
+- 環境を作る `uv sync` が読んでいる最中に、別の投入が同じツリーを上書きした
+
+いずれもジョブ側からは分からない。`git log` も PR も正しいコミットを指している。
+
+- ➜ 投入ごとに `$WORK_ROOT/src/<id>/` へ写し、ジョブをそのパスに固定する（「ソース
+  スナップショット」の節）。`--delete` は消え、`rsync` の宛先は毎回空のディレクトリになる
+- ➜ `current` symlink 越しに入っても `REPO_ROOT` は物理パスに解決する（`pwd -P`）
+  ➜ 走っている最中に symlink が動いても、`uv sync` は始めたツリーで終わる
 
 **FP8 の MoE は TensorRT-LLM のカーネルキャッシュで起動に失敗する**
 
@@ -350,6 +411,8 @@ served models: ['Qwen/Qwen3.6-35B-A3B-FP8']
   - upstream の無いブランチでは黙る。毎回鳴る警告は無視されるようになるため
   - 意図的に古い木を送るなら `SYNC_ALLOW_STALE=1`
 - ➜ sync のたびに「どのブランチのどのコミットを、未コミット何件込みで送ったか」を必ず出す
+- ➜ 同じ情報をスナップショットの `.snapshot` にも書き、ジョブ開始時のログに出す
+  ➜ 走り終えたジョブの出力だけで、どのコミットだったかが分かる
 
 **ラン間で状態が漏れ、測定が「何本目か」に依存する**
 

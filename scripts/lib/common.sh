@@ -11,8 +11,13 @@
 
 # --- Site configuration -----------------------------------------------------
 
-COMMON_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd "${COMMON_SH_DIR}/../.." && pwd)}"
+# `pwd -P`, not `pwd`: on the login node the source tree is usually reached
+# through the `current` symlink, which every sync repoints at a newer snapshot.
+# Resolving it here pins a long-running command -- `uv sync` is the one that
+# matters -- to the tree it started in, instead of letting the symlink move
+# underneath it halfway through.
+COMMON_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="${REPO_ROOT:-$(cd "${COMMON_SH_DIR}/../.." && pwd -P)}"
 
 # Account, group and reservation id identify one particular allocation, so they
 # stay out of version control. Copy config/env.example to config/env.local and
@@ -34,6 +39,24 @@ fi
 # see the note in pyproject.toml about why vLLM is left unpinned.
 VENV="${VENV:-${WORK_ROOT}/venv}"
 RUNS_DIR="${RUNS_DIR:-${WORK_ROOT}/runs}"
+
+# --- Source snapshots -------------------------------------------------------
+
+# Every submission copies the working tree into a directory of its own under
+# here, and the job is pinned to that copy. The tree a queued job will run is
+# therefore decided at submit time and cannot be edited afterwards -- not by
+# the next sync, and not by whoever else is submitting at the same moment.
+#
+# On the group area rather than home: snapshots are hardlinked against each
+# other so they cost little, but home is a shared quota and this grows with
+# every submission. scripts/snapshots.sh is how they go away again.
+SRC_ROOT="${SRC_ROOT:-${WORK_ROOT}/src}"
+
+# The newest snapshot, for the things a human runs by hand: the setup scripts,
+# and one-off commands through scripts/ssh.sh. Jobs never go through it. They
+# are given a resolved snapshot path at submit time, because this symlink moves
+# and the whole point is that their source does not.
+REMOTE_REPO="${REMOTE_REPO:-${SRC_ROOT}/current}"
 
 export HF_HOME="${HF_HOME:-${WORK_ROOT}/hf-cache}"
 
@@ -385,6 +408,99 @@ assert_not_behind_upstream() {
     fi
 
     die "${branch} (${head}) is ${behind} commit(s) behind ${upstream} (${ahead} ahead). sync.sh copies the working tree, so the cluster would run code your git history does not match. Pull first, or set SYNC_ALLOW_STALE=1 to ship this tree on purpose."
+}
+
+# @description Mint the name for one submission's source snapshot.
+# @description
+#   Two properties matter, and only one of them is cosmetic.
+#
+#   The timestamp prefix sorts chronologically under a plain `sort`, which is
+#   what scripts/snapshots.sh relies on to decide which snapshots are the newest
+#   and what a human reads to see when a tree was shipped. The commit is there
+#   so a directory listing on the login node answers "which code is this".
+#
+#   The random suffix is the part that has to be right. Two submissions started
+#   in the same second -- two agents, two terminals -- would otherwise pick the
+#   same name and land in the same directory, which is the failure this whole
+#   mechanism exists to remove. It comes from /dev/urandom rather than $RANDOM
+#   because two shells forked from one parent seed $RANDOM identically.
+# @stdout Snapshot identifier, e.g. 20260915T104512Z-800e63d-3f9a1c.
+new_snapshot_id() {
+    local stamp head rand
+
+    stamp="$(date -u '+%Y%m%dT%H%M%SZ')"
+    head="$(git -C "${REPO_ROOT}" rev-parse --short=7 HEAD 2>/dev/null || echo nogit)"
+    # od rather than `tr -dc ... | head -c`: head closing the pipe early makes
+    # tr die of SIGPIPE, and under `set -o pipefail` that aborts the caller.
+    rand="$(od -An -tx1 -N3 /dev/urandom | tr -d ' \n')"
+
+    printf '%s-%s-%s' "${stamp}" "${head}" "${rand}"
+}
+
+# @description Populate the global RSYNC_ARGS array for a snapshot transfer.
+# @description
+#   The destination is a directory that does not exist yet, so there is nothing
+#   to delete and `--delete` is gone. That removes the hazard the excludes below
+#   used to guard: `--delete` against the one shared tree erased the job output
+#   of whatever was still running. They stay only to keep stray local job output
+#   out of a snapshot.
+#
+#   `--link-dest` is what makes a snapshot per submission affordable. The tree
+#   is ~250 MB, nearly all of it vendor/AgentSociety, and a full copy per
+#   submission would be paid twice: once on the wire and once on the group area.
+#   Files identical to the previous snapshot are neither transferred nor copied,
+#   just hardlinked.
+#
+#   The consequence is worth knowing: unchanged files in two snapshots are one
+#   inode. rsync never trips over this -- it writes a new file and renames -- but
+#   appending to a file inside a snapshot by hand would change it in every
+#   snapshot that shares it. Edit the checkout and sync, do not edit a snapshot.
+# @arg $1 path Snapshot directory on the login node. Absolute.
+build_snapshot_rsync_args() {
+    local dest="$1"
+
+    [[ -n "${dest}" ]] || die "build_snapshot_rsync_args needs a destination"
+
+    # Filled here, read by scripts/sync.sh, the same arrangement build_vllm_args
+    # has with VLLM_ARGS. shellcheck only sees the assignment.
+    # shellcheck disable=SC2034
+    RSYNC_ARGS=(
+        -az
+        # Resolved on the receiving side. A missing one is a warning, not an
+        # error, so the first snapshot into an empty SRC_ROOT works.
+        --link-dest="${REMOTE_REPO}"
+        --exclude '.git'
+        --exclude '.claude'
+        --exclude '__pycache__'
+        --exclude '*.o[0-9]*'
+        --exclude '*.e[0-9]*'
+        --exclude '*.po[0-9]*'
+        --exclude '*.pe[0-9]*'
+    )
+}
+
+# @description Log which snapshot of the source this process is running from.
+# @description
+#   A job reads its code from a directory, and until now nothing in its output
+#   said which commit that directory held. Ten jobs once ran the previous commit
+#   without a word about it. The marker is written by scripts/sync.sh; running a
+#   job script by hand from a checkout leaves it absent, which is itself worth
+#   saying.
+log_source_snapshot() {
+    local marker="${REPO_ROOT}/.snapshot" line
+
+    log "source  ${REPO_ROOT}"
+
+    if [[ ! -f "${marker}" ]]; then
+        log "source  no snapshot marker; this tree was not shipped by scripts/submit.sh"
+        return 0
+    fi
+
+    while IFS= read -r line; do
+        [[ -n "${line}" ]] && log "source  ${line}"
+    done <"${marker}"
+
+    return 0
 }
 
 # --- vLLM -------------------------------------------------------------------

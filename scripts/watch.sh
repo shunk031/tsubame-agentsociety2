@@ -25,8 +25,9 @@ source "${SCRIPT_DIR}/lib/common.sh"
 : "${TSUBAME_USER:?not set - see config/env.example}"
 : "${TSUBAME_LOGIN_HOST:?not set - see config/env.example}"
 
-REMOTE_REPO="${REMOTE_REPO:-tsubame-agentsociety2}"
-
+# One directory is enough now. Grid Engine's own output file used to land in
+# the submit directory and the run's logs under RUNS_DIR; scripts/submit.sh
+# redirects the former, so both are here.
 ssh -t "${TSUBAME_USER}@${TSUBAME_LOGIN_HOST}" \
-    bash -s -- "\$HOME/${REMOTE_REPO}" "${RUNS_DIR}" "${1:-}" \
+    bash -s -- "${RUNS_DIR}" "${1:-}" \
     < "${SCRIPT_DIR}/remote/watch_remote.sh"

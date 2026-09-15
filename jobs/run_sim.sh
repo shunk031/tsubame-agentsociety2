@@ -29,6 +29,11 @@ set -euo pipefail
 
 # Grid Engine runs a spooled copy of this file, so BASH_SOURCE points somewhere
 # with no repository around it. See the same note in jobs/smoke.sh.
+#
+# Submitted through scripts/submit.sh, REPO_ROOT arrives already set to this
+# submission's source snapshot and both fallbacks are unused. They still matter:
+# SGE_O_WORKDIR is the same snapshot by another route, and BASH_SOURCE is for
+# running this file by hand from an iqrsh session.
 REPO_ROOT="${REPO_ROOT:-${SGE_O_WORKDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
 # shellcheck source=../scripts/lib/common.sh
 source "${REPO_ROOT}/scripts/lib/common.sh"
@@ -48,6 +53,7 @@ mkdir -p "${AGENTSOCIETY_HOME_DIR}"
 
 log "host    $(hostname)"
 log "job     ${JOB_ID:-<interactive>}"
+log_source_snapshot
 log "run dir ${RUN_DIR}"
 log "model   ${MODEL}"
 log "env     ${ENV_MODULE}"

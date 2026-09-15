@@ -1,7 +1,8 @@
 # Site-specific values: account, group, reservation id.
 config/env.local
 
-# Grid Engine drops job output beside the submit directory.
+# Grid Engine job output. It lands under $WORK_ROOT/runs on the cluster now,
+# not in a checkout, but rsyncing a run back here is a normal thing to do.
 *.o[0-9]*
 *.e[0-9]*
 *.po[0-9]*

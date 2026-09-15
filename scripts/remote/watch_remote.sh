@@ -7,23 +7,23 @@
 #   the local checkout and needs no quoting gymnastics in the caller.
 #
 #   Two log streams matter and they appear at different times: Grid Engine's
-#   job output in the submit directory, and the per-run logs under RUNS_DIR.
-#   Only files that already exist are passed to tail, which otherwise complains
-#   about every missing path on each poll.
+#   job output, opened before the script runs, and the per-run logs the job
+#   writes once it has started. Both live under RUNS_DIR -- scripts/submit.sh
+#   directs the first one there, because the job's working directory is now a
+#   source snapshot that gets pruned. Only files that already exist are passed
+#   to tail, which otherwise complains about every missing path on each poll.
 #
-# @arg $1 path Repository directory on the login node.
-# @arg $2 path Run output directory.
-# @arg $3 int Job id. Empty to pick the newest running job.
+# @arg $1 path Run output directory.
+# @arg $2 int Job id. Empty to pick the newest running job.
 #
 # @example
-#   ssh "$host" bash -s -- "$repo" "$runs_dir" "$job_id" \
+#   ssh "$host" bash -s -- "$runs_dir" "$job_id" \
 #     < scripts/remote/watch_remote.sh
 
 set -uo pipefail
 
-remote_repo="$1"
-runs_dir="$2"
-job_id="${3:-}"
+runs_dir="$1"
+job_id="${2:-}"
 
 # With no job id, keep following whatever is newest. Resubmitting is the normal
 # rhythm of getting a job right, and having to restart the watcher each time is
@@ -60,7 +60,7 @@ collect_logs() {
 
     logs=()
 
-    for candidate in "${remote_repo}"/*."o${job_id}"; do
+    for candidate in "${runs_dir}"/*."o${job_id}"; do
         [[ -f "${candidate}" ]] && logs+=("${candidate}")
     done
 
