@@ -94,6 +94,69 @@ else
     VLLM_PORT="${VLLM_PORT:-8000}"
 fi
 
+# --- Scheduler resources ----------------------------------------------------
+
+# @description Report the GPU resource submit.sh should add, if any.
+# @description
+#   Grid Engine merges an embedded "#$ -l" with the command line rather than
+#   letting the command line win, so a job script cannot both default to one
+#   GPU and be submittable to a whole node: asking for node_f alongside a
+#   hardcoded gpu_1 is rejected outright. The default therefore lives here,
+#   where it can stand aside when the caller names its own resource.
+# @arg $@ string The arguments submit.sh was given.
+# @stdout The resource to add, or nothing when the caller already chose one.
+default_gpu_resource() {
+    local arg want=0
+    for arg in "$@"; do
+        if [[ "${want}" -eq 1 ]]; then
+            # Only a GPU resource counts. An -l h_rt or -l m_mem_free says
+            # nothing about devices and must not suppress the default.
+            [[ "${arg}" == node_?=* ]] || [[ "${arg}" == gpu_*=* ]] && return 0
+            want=0
+            continue
+        fi
+        [[ "${arg}" == "-l" ]] && want=1
+    done
+    echo "gpu_1=1"
+}
+
+# --- GPU telemetry ----------------------------------------------------------
+
+# @description Sample GPU utilisation into the run directory until the job ends.
+# @description
+#   vLLM's log offers queue depth, KV-cache occupancy and tokens per second.
+#   None of those is utilisation: a run can hold nineteen requests, report seven
+#   percent of the KV cache and still leave the SMs mostly idle, and reasoning
+#   about saturation from those proxies has already produced one wrong answer
+#   here. nvidia-smi is the only thing on this node that measures the device.
+#
+#   Stopped from inside stop_vllm / stop_all_vllm, which are what the EXIT trap
+#   actually runs, so the sampler cannot outlive the run and keep writing into a
+#   finished directory. A third bare `trap ... EXIT` would not survive: start_vllm
+#   and start_embedding_vllm each overwrite the handler.
+# @arg $1 path CSV to write.
+# @set GPU_SAMPLER_PID int PID of the background sampler, when one started.
+start_gpu_sampler() {
+    local out="$1"
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        log "gpu     no nvidia-smi; utilisation will not be recorded"
+        return 0
+    fi
+    nvidia-smi \
+        --query-gpu=timestamp,index,utilization.gpu,utilization.memory,memory.used,power.draw \
+        --format=csv,nounits -l 5 >"${out}" 2>/dev/null &
+    GPU_SAMPLER_PID=$!
+    log "gpu     sampling every 5s to ${out}"
+}
+
+# @description Stop the sampler started by start_gpu_sampler, if any.
+stop_gpu_sampler() {
+    [[ -n "${GPU_SAMPLER_PID:-}" ]] || return 0
+    kill "${GPU_SAMPLER_PID}" 2>/dev/null || true
+    wait "${GPU_SAMPLER_PID}" 2>/dev/null || true
+    GPU_SAMPLER_PID=""
+}
+
 # --- TensorRT-LLM kernel cache ----------------------------------------------
 
 # On SM90+ the FP8 MoE path defaults to a TensorRT-LLM block-scale GEMM that is
@@ -501,6 +564,11 @@ start_embedding_vllm() {
 # shellcheck disable=SC2317
 stop_all_vllm() {
     local pid
+    # start_vllm and start_embedding_vllm each install a bare `trap ... EXIT`,
+    # which overwrites any handler set before it. Tearing the sampler down from
+    # inside the vLLM stoppers is therefore the only placement that survives
+    # both, and it keeps the sampler from writing into a finished run.
+    stop_gpu_sampler
     for pid in "${EMBEDDING_PID:-}" "${VLLM_PID:-}"; do
         if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
             log "stopping vLLM (pid ${pid})"
@@ -516,6 +584,7 @@ stop_all_vllm() {
 #   the server holding its GPUs until the wall clock runs out.
 # shellcheck disable=SC2317
 stop_vllm() {
+    stop_gpu_sampler
     if [[ -n "${VLLM_PID:-}" ]] && kill -0 "${VLLM_PID}" 2>/dev/null; then
         log "stopping vLLM (pid ${VLLM_PID})"
         kill "${VLLM_PID}" 2>/dev/null || true

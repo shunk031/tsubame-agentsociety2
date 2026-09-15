@@ -55,6 +55,12 @@ else
     qsub_args+=(-q prior)
     log "submitting to the prior queue"
 fi
+# Added here rather than as a "#$ -l" in the job script: Grid Engine merges
+# the two and rejects node_f alongside gpu_1, so a hardcoded default would make
+# whole-node submission impossible.
+gpu_resource="$(default_gpu_resource "$@")"
+[[ -n "${gpu_resource}" ]] && qsub_args+=(-l "${gpu_resource}")
+
 qsub_args+=("$@" "${JOB_SCRIPT}")
 
 # REMOTE_REPO and the qsub arguments are expanded here on purpose: the remote

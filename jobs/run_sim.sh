@@ -23,7 +23,6 @@
 #$ -V
 #$ -N as2-sim
 #$ -j y
-#$ -l gpu_1=1
 #$ -l h_rt=1:00:00
 
 set -euo pipefail
@@ -105,6 +104,11 @@ log "batch   ${BATCH_SIZE} agents per task, ${RAY_TASKS} task(s) per tick"
 log "gpus    ${GPU_COUNT} (data parallel size ${DP_SIZE})"
 
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+
+# Before vLLM, so the trace covers model load and warmup as well as the
+# simulation: a run that looks idle is a different problem from one that never
+# got started, and the difference is visible only in the first minutes.
+start_gpu_sampler "${RUN_DIR}/gpu.csv"
 
 start_vllm "${DP_SIZE}" "${RUN_DIR}/vllm.log"
 
