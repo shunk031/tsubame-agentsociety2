@@ -71,6 +71,15 @@ export AGENTSOCIETY_LLM_RAY_MAX_WORKERS="${AGENTSOCIETY_LLM_RAY_MAX_WORKERS:-${C
 BATCH_SIZE="${BATCH_SIZE:-$(ray_batch_size "${NUM_AGENTS}" "${AGENTSOCIETY_LLM_RAY_MAX_WORKERS}")}"
 RAY_TASKS=$(( NUM_AGENTS > 0 ? (NUM_AGENTS + BATCH_SIZE - 1) / BATCH_SIZE : 1 ))
 
+# vLLM JIT-compiles CUDA kernels at startup (FlashInfer's gated-delta-net
+# prefill, among others) and ninja sizes itself from nproc unless MAX_JOBS says
+# otherwise. nproc reports the whole physical node, so ninja fans out to
+# hundreds of nvcc processes inside a job-sized memory cgroup, the kernel kills
+# cicc with signal 9, and the only visible symptom is "Ninja build failed" and
+# a vLLM that never binds its port. Three 35B jobs died this way before the
+# cause was found; the granted slot count is the bound that fits the cgroup.
+export MAX_JOBS="${MAX_JOBS:-${CPU_CORES}}"
+
 # ray.init is called without _temp_dir, so Ray falls back to /tmp. Grid Engine
 # gives each job a private TMPDIR on node-local storage; pointing Ray at it
 # keeps runs from colliding over a shared path.

@@ -359,6 +359,27 @@ assert_batch_size 0 8 256
     exit 1
 ) || failures=$((failures + 1))
 
+# The JIT compilers vLLM invokes at startup size their own parallelism from
+# nproc, which reports the whole physical node rather than the slots Grid
+# Engine granted -- the same trap detect_cpu_cores already covers for Ray.
+# ninja then launches ~200 nvcc processes inside a job-sized memory cgroup and
+# the kernel kills cicc with signal 9, which surfaces as an unexplained
+# "Ninja build failed" and a vLLM that never comes up.
+(
+    job="${SCRIPT_DIR}/../../jobs/run_sim.sh"
+    missing=0
+    grep -q 'export MAX_JOBS' "${job}" || missing=1
+    # Bounded by the granted slots, not by nproc: a literal or an nproc call
+    # would reintroduce the bug the export exists to prevent.
+    grep -q 'MAX_JOBS="${MAX_JOBS:-${CPU_CORES}}"' "${job}" || missing=1
+    if [[ "${missing}" -eq 0 ]]; then
+        printf 'ok   %-34s bounded by the granted slots\n' "jit build parallelism"
+        exit 0
+    fi
+    printf 'FAIL %-34s run_sim.sh leaves MAX_JOBS unbounded\n' "jit build parallelism"
+    exit 1
+) || failures=$((failures + 1))
+
 if [[ "${failures}" -gt 0 ]]; then
     printf '\n%d check(s) failed\n' "${failures}"
     exit 1
