@@ -220,6 +220,14 @@ detect_gpu_count() {
 #   back to os.cpu_count(), which reports the whole physical node (192 cores on
 #   node_f) regardless of what UGE granted, and over-subscribes the job.
 # @stdout Usable core count.
+detect_cpu_cores() {
+    if [[ -n "${NSLOTS:-}" ]] && [[ "${NSLOTS}" -gt 0 ]]; then
+        echo "${NSLOTS}"
+    else
+        nproc
+    fi
+}
+
 # @description Agents per step_agent_batch Ray Task, sized to fill the workers.
 # @description
 #   Upstream chunks the agent list every tick and submits ceil(N / BATCH_SIZE)
@@ -247,14 +255,6 @@ ray_batch_size() {
     size=$(( agents / workers ))
     (( size > 0 )) || size=1
     echo "${size}"
-}
-
-detect_cpu_cores() {
-    if [[ -n "${NSLOTS:-}" ]] && [[ "${NSLOTS}" -gt 0 ]]; then
-        echo "${NSLOTS}"
-    else
-        nproc
-    fi
 }
 
 # --- Source tree ------------------------------------------------------------
