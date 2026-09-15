@@ -503,6 +503,261 @@ log_source_snapshot() {
     return 0
 }
 
+# --- Environment provenance -------------------------------------------------
+
+# agentsociety2 comes from vendor/AgentSociety, and nothing uv records moves
+# when that source is patched: uv.lock names the dependency
+# `source = { directory = ... }` and stores no digest of what is in the
+# directory, and the version stays 2.8.7 across every patch. Two environments
+# under WORK_ROOT/venvs can therefore report identical versions and hold
+# different code -- which is deliberate, they are how patches are compared, and
+# also how a run once reported on a patch that was never installed.
+#
+# The answer is a pair of digests written into the environment at build time
+# and re-checked by every job: what the build read, and what it produced.
+
+# Stamp name, relative to the environment root. It lives inside the environment
+# rather than beside it so that deleting the environment takes its claim with
+# it, and so an environment copied elsewhere keeps its own provenance.
+ENV_PROVENANCE_NAME=".source-provenance"
+
+# @description Digest a directory tree by content, independent of where it sits.
+# @description
+#   Paths enter the digest relative to the root, so the vendored source and the
+#   copy uv installs into site-packages digest the same way, and a tree digests
+#   the same on a laptop, on the login node and on a compute node.
+#
+#   __pycache__ is excluded because it is written by whoever imports the code
+#   first: the vendored tree collects it from local runs, site-packages
+#   collects it the moment a job starts. Including it would make a recorded
+#   digest stop matching itself after the first run.
+# @arg $1 path Directory to digest.
+# @stdout 64 hex characters.
+# @exitcode 1 No such directory.
+fingerprint_tree() {
+    local root="$1"
+
+    [[ -d "${root}" ]] || return 1
+
+    # LC_ALL=C so the ordering does not depend on the caller's locale; -print0
+    # and -0 so a path with a space cannot split one entry into two.
+    (
+        cd "${root}" || exit 1
+        find . -type f \
+            ! -path '*/__pycache__/*' \
+            ! -name '*.py[co]' \
+            ! -path '*/.git/*' \
+            ! -path '*.egg-info/*' \
+            -print0 |
+            LC_ALL=C sort -z |
+            xargs -0 -r sha256sum
+    ) | sha256sum | cut -d' ' -f1
+}
+
+# @description Print the digests that decide what `uv sync` will install.
+# @description
+#   Named components rather than one opaque number, so a mismatch can say which
+#   half moved: a changed lockfile and a patched vendored source call for
+#   different responses.
+#
+#   The vendored package contributes two of them. `vendor` is the importable
+#   subtree hatchling puts in the wheel; docs/, tests/ and examples/ sit beside
+#   it and never reach the environment, so editing one of those does not fire
+#   the guard. `vendor_project` is the vendored pyproject.toml, which decides
+#   what the wheel declares and therefore what uv resolves.
+#
+#   pyproject.toml at the repository root is deliberately not a component.
+#   `uv sync --locked` refuses to run when it disagrees with uv.lock, so the
+#   lockfile already stands for it, while hashing it too would fire on a
+#   comment or a pytest setting that cannot reach the environment.
+# @arg $1 path Repository root. Defaults to REPO_ROOT.
+# @stdout One `<component> <digest>` line per component.
+# @exitcode 1 Something the digest needs is missing.
+source_fingerprint_components() {
+    local repo="${1:-${REPO_ROOT}}"
+    local package="${repo}/vendor/AgentSociety/packages/agentsociety2"
+    local lock vendor_project vendor
+
+    [[ -f "${repo}/uv.lock" ]] || {
+        log "ERROR: no uv.lock under ${repo}"
+        return 1
+    }
+    # An unpopulated submodule leaves an empty directory, which would otherwise
+    # digest as a perfectly valid empty tree.
+    [[ -f "${package}/agentsociety2/__init__.py" ]] || {
+        log "ERROR: no agentsociety2 package under ${package}; run git submodule update --init --recursive"
+        return 1
+    }
+
+    # Redirected rather than passed as arguments: sha256sum prints the path it
+    # was given, and the digest has to depend on the bytes alone.
+    lock="$(sha256sum <"${repo}/uv.lock" | cut -d' ' -f1)"
+    vendor_project="$(sha256sum <"${package}/pyproject.toml" | cut -d' ' -f1)"
+    vendor="$(fingerprint_tree "${package}/agentsociety2")" || return 1
+
+    printf 'lock %s\nvendor_project %s\nvendor %s\n' \
+        "${lock}" "${vendor_project}" "${vendor}"
+}
+
+# @description Digest the source an environment would be built from.
+# @arg $1 path Repository root. Defaults to REPO_ROOT.
+# @stdout 64 hex characters.
+# @exitcode 1 The components could not be computed.
+source_fingerprint() {
+    local components
+
+    components="$(source_fingerprint_components "${1:-${REPO_ROOT}}")" || return 1
+    printf '%s\n' "${components}" | sha256sum | cut -d' ' -f1
+}
+
+# @description Locate the installed agentsociety2 package inside an environment.
+# @description
+#   The interpreter version is part of the path and this project pins 3.12, but
+#   globbing keeps the helper from lying if that ever moves.
+# @arg $1 path Virtualenv. Defaults to VENV.
+# @stdout Absolute path to the package directory.
+# @exitcode 1 The environment has no agentsociety2 in it.
+venv_package_dir() {
+    local venv="${1:-${VENV}}" candidate
+
+    for candidate in "${venv}"/lib/python3.*/site-packages/agentsociety2; do
+        if [[ -d "${candidate}" ]]; then
+            printf '%s' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# @description Digest agentsociety2 as it is actually installed.
+# @description
+#   Only agentsociety2, not the whole of site-packages: every other package
+#   comes from a wheel the lockfile pins by hash, and digesting torch and vLLM
+#   as well would turn a sub-second check into a walk over tens of thousands of
+#   files.
+# @arg $1 path Virtualenv. Defaults to VENV.
+# @stdout 64 hex characters.
+# @exitcode 1 The environment has no agentsociety2 in it.
+installed_fingerprint() {
+    local package
+
+    package="$(venv_package_dir "${1:-${VENV}}")" || return 1
+    fingerprint_tree "${package}"
+}
+
+# @description Record what an environment was built from, inside the environment.
+# @description
+#   Two digests, because they fail apart. `source` is what the build read, and
+#   catches a job launched from a tree that is not the one the environment came
+#   from. `installed` is what the build produced, and catches an environment
+#   that was edited, half-deleted or half-written after the fact.
+#
+#   Call this only after the installation has been verified. A stamp is a claim
+#   that the environment is usable, and writing one for a build that has not
+#   been checked would make the claim worthless.
+# @arg $1 path Virtualenv. Defaults to VENV.
+# @arg $2 path Repository the build read. Defaults to REPO_ROOT.
+# @exitcode 1 Either digest could not be computed; no stamp is written.
+write_env_provenance() {
+    local venv="${1:-${VENV}}" repo="${2:-${REPO_ROOT}}"
+    local stamp="${venv}/${ENV_PROVENANCE_NAME}"
+    local components source installed version
+
+    components="$(source_fingerprint_components "${repo}")" || return 1
+    source="$(printf '%s\n' "${components}" | sha256sum | cut -d' ' -f1)"
+    installed="$(installed_fingerprint "${venv}")" || {
+        log "ERROR: no agentsociety2 installed in ${venv}"
+        return 1
+    }
+    # Informational: the version is the thing that does not distinguish these
+    # environments, which is worth being able to see at a glance.
+    version="$("${venv}/bin/python" -c \
+        'import importlib.metadata as m; print(m.version("agentsociety2"))' 2>/dev/null || echo unknown)"
+
+    {
+        printf 'schema 1\n'
+        printf '%s\n' "${components}"
+        printf 'source %s\n' "${source}"
+        printf 'installed %s\n' "${installed}"
+        printf 'version %s\n' "${version}"
+        printf 'built_at %s\n' "$(date --iso-8601=seconds)"
+    } >"${stamp}"
+
+    log "recorded provenance: source ${source:0:12}, installed ${installed:0:12} (${stamp})"
+}
+
+# @description Refuse to run a job against an environment built from other source.
+# @description
+#   The failure this exists for is quiet by construction. An environment built
+#   from the wrong source imports, runs and produces a replay that looks like
+#   every other replay; the only way it was ever caught was by grepping the
+#   installed package by hand afterwards. So the check is made at job start,
+#   before the GPU time is spent, and it fails rather than warns.
+#
+#   Both recorded digests are re-derived rather than trusted: the source, from
+#   the tree this job was launched with, and the installed package, from the
+#   files in the environment. A stamp on its own would only prove that a build
+#   once happened.
+#
+#   Running against a deliberately different environment is a normal thing to
+#   do -- that is what the environments under WORK_ROOT/venvs are for. Set
+#   ENV_ALLOW_MISMATCH=1 to say so; the job then records in its own log that it
+#   did, because a run whose environment does not match its source is a run
+#   whose log has to say which environment it described.
+# @arg $1 path Virtualenv. Defaults to VENV.
+# @arg $2 path Repository this job was launched from. Defaults to REPO_ROOT.
+# @exitcode 1 They disagree and ENV_ALLOW_MISMATCH is unset.
+assert_env_matches_source() {
+    local venv="${1:-${VENV}}" repo="${2:-${REPO_ROOT}}"
+    local stamp="${venv}/${ENV_PROVENANCE_NAME}"
+    local key value components current installed problem=""
+    local -A recorded=()
+    local -a differing=()
+
+    if [[ -r "${stamp}" ]]; then
+        while read -r key value; do
+            recorded["${key}"]="${value}"
+        done <"${stamp}"
+    else
+        problem="${venv} records no provenance: either it predates this check, or its build never finished. A build killed partway leaves an environment that still imports and still reports a version, holding whatever it had copied by then."
+    fi
+
+    if [[ -z "${problem}" ]] && ! components="$(source_fingerprint_components "${repo}")"; then
+        problem="the source under ${repo} could not be digested, so nothing can be said about ${venv}."
+    fi
+
+    if [[ -z "${problem}" ]]; then
+        current="$(printf '%s\n' "${components}" | sha256sum | cut -d' ' -f1)"
+        if [[ "${current}" != "${recorded[source]:-}" ]]; then
+            while read -r key value; do
+                [[ "${value}" == "${recorded[${key}]:-}" ]] || differing+=("${key}")
+            done <<<"${components}"
+            problem="${venv} was built from source this job was not launched with: recorded ${recorded[source]:0:12}, current ${current:0:12}, differing in ${differing[*]:-<unrecorded>}."
+        fi
+    fi
+
+    if [[ -z "${problem}" ]]; then
+        if ! installed="$(installed_fingerprint "${venv}")"; then
+            problem="${venv} has no agentsociety2 installed, though it claims a build."
+        elif [[ "${installed}" != "${recorded[installed]:-}" ]]; then
+            problem="${venv} no longer holds what its own build produced: recorded ${recorded[installed]:0:12}, current ${installed:0:12}. Something rewrote the installed files after the build."
+        fi
+    fi
+
+    if [[ -z "${problem}" ]]; then
+        log "env     ${current:0:12} matches ${venv##*/} (built ${recorded[built_at]:-unknown}, agentsociety2 ${recorded[version]:-unknown})"
+        return 0
+    fi
+
+    if [[ -n "${ENV_ALLOW_MISMATCH:-}" ]]; then
+        log "WARNING: ${problem}"
+        log "WARNING: continuing because ENV_ALLOW_MISMATCH is set. This run describes ${venv}, not the checkout it was launched from."
+        return 0
+    fi
+
+    die "${problem} Rebuild it with scripts/setup/02_sync_env.sh, point VENV at the environment this source belongs to, or set ENV_ALLOW_MISMATCH=1 to run against it on purpose."
+}
+
 # --- vLLM -------------------------------------------------------------------
 
 # @description Populate the global VLLM_ARGS array for the selected model.

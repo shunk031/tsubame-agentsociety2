@@ -60,6 +60,11 @@ log "env     ${ENV_MODULE}"
 log "state   ${AGENT_HOME_MODE} (${AGENTSOCIETY_HOME_DIR})"
 log "agents  ${NUM_AGENTS:-<env default>} over ${NUM_ROUNDS} rounds of ${TICK_SECONDS}s"
 
+# Before anything expensive. An environment built from other source runs, exits
+# 0 and writes a replay that reads like every other replay, so the only place to
+# catch it is here -- ahead of the model load, not after the numbers exist.
+assert_env_matches_source "${VENV}" "${REPO_ROOT}"
+
 GPU_COUNT="$(detect_gpu_count)"
 [[ "${GPU_COUNT}" -gt 0 ]] || die "no GPU visible; submit with a GPU resource type"
 DP_SIZE="${DP_SIZE:-${GPU_COUNT}}"

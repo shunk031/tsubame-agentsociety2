@@ -57,6 +57,11 @@ log_source_snapshot
 log "run dir ${RUN_DIR}"
 log "model   ${MODEL}"
 
+# A smoke test against the wrong environment is as misleading as a simulation
+# against one: it reports that "the environment works" about an environment
+# nobody asked for. The check costs a fraction of a second.
+assert_env_matches_source "${VENV}" "${REPO_ROOT}"
+
 GPU_COUNT="$(detect_gpu_count)"
 [[ "${GPU_COUNT}" -gt 0 ]] || die "no GPU visible; submit with a GPU resource type"
 DP_SIZE="${DP_SIZE:-${GPU_COUNT}}"
