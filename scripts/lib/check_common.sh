@@ -1124,6 +1124,73 @@ for job in run_sim smoke; do
     fi
 done
 
+# agentsociety2 never sets max_tokens, so a reply is bounded only by what is
+# left of the context. With reasoning on, an agent can spend the whole budget
+# thinking: four runs held the GPU at 93-95% for an hour and recorded no
+# environment events at all, while a fifth on the same model and settings
+# produced 110. The cap bounds the spend without switching reasoning off, which
+# is why it is a separate knob from ENABLE_THINKING.
+# @description Assert the generation cap vLLM would be started with.
+# @arg $1 string Value of GENERATION_MAX_TOKENS.
+# @arg $2 string Expected flag text, or "" when no flag should be emitted.
+assert_generation_cap() {
+    local value="$1" expected="$2" rendered
+    rendered="$(
+        GENERATION_MAX_TOKENS="${value}" MODEL=Qwen/Qwen3.6-27B \
+            bash -c "source '${SCRIPT_DIR}/common.sh'; build_vllm_args 1; printf '%s' \"\${VLLM_ARGS[*]}\""
+    )"
+    if [[ -z "${expected}" ]]; then
+        if [[ "${rendered}" != *override-generation-config* ]]; then
+            printf 'ok   %-34s uncapped by default\n' "generation cap"
+        else
+            printf 'FAIL %-34s capped when it should not be\n' "generation cap"
+            failures=$((failures + 1))
+        fi
+        return
+    fi
+    if [[ "${rendered}" == *"${expected}"* ]]; then
+        printf 'ok   %-34s %s\n' "generation cap" "${expected}"
+    else
+        printf 'FAIL %-34s missing %s\n' "generation cap" "${expected}"
+        failures=$((failures + 1))
+    fi
+}
+# Unset keeps the present behaviour, so the cap is an experiment rather than a
+# silent change to every run that came before it.
+assert_generation_cap "" ""
+assert_generation_cap 4096 '{"max_new_tokens": 4096}'
+
+# The cap bounds a reply; it has nothing to do with whether the model reasons.
+# Nesting it under the reasoning-model branch would make it a silent no-op for
+# any other family, which is the failure mode this repository keeps hitting.
+(
+    rendered="$(
+        GENERATION_MAX_TOKENS=4096 MODEL=meta-llama/Llama-3.1-8B-Instruct \
+            bash -c "source '${SCRIPT_DIR}/common.sh'; build_vllm_args 1; printf '%s' \"\${VLLM_ARGS[*]}\""
+    )"
+    if [[ "${rendered}" == *'{"max_new_tokens": 4096}'* ]]; then
+        printf 'ok   %-34s applies to any model family\n' "generation cap"
+        exit 0
+    fi
+    printf 'FAIL %-34s skipped for a non-reasoning model\n' "generation cap"
+    exit 1
+) || failures=$((failures + 1))
+
+# Reasoning must survive the cap: the point is to bound how long an agent
+# thinks, not to stop it thinking.
+(
+    rendered="$(
+        GENERATION_MAX_TOKENS=4096 ENABLE_THINKING=1 MODEL=Qwen/Qwen3.6-27B \
+            bash -c "source '${SCRIPT_DIR}/common.sh'; build_vllm_args 1; printf '%s' \"\${VLLM_ARGS[*]}\""
+    )"
+    if [[ "${rendered}" == *'"enable_thinking": true'* ]]; then
+        printf 'ok   %-34s reasoning still on\n' "generation cap"
+        exit 0
+    fi
+    printf 'FAIL %-34s the cap switched reasoning off\n' "generation cap"
+    exit 1
+) || failures=$((failures + 1))
+
 if [[ "${failures}" -gt 0 ]]; then
     printf '\n%d check(s) failed\n' "${failures}"
     exit 1

@@ -100,6 +100,18 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
 # throughput; see build_vllm_args for what it switches.
 export ENABLE_THINKING="${ENABLE_THINKING:-1}"
 
+# Upper bound on a single reply, applied server-side because agentsociety2
+# never sends max_tokens (see MAX_MODEL_LEN above). Unset leaves the reply
+# bounded only by the remaining context, which is what lets a reasoning model
+# spend the entire budget thinking and return nothing: four 128-agent runs held
+# the GPU at 93-95% for an hour and recorded no environment events, while a
+# fifth on the same model and settings recorded 110.
+#
+# Deliberately not a sibling of ENABLE_THINKING. Switching reasoning off buys
+# throughput by giving up deliberation; this bounds how long the deliberation
+# may run and keeps it.
+GENERATION_MAX_TOKENS="${GENERATION_MAX_TOKENS:-}"
+
 # vLLM ships qwen3_coder and qwen3_xml for this family. The Qwen3.x chat
 # templates emit <tool_call><function=...>, which is what qwen3_coder reads.
 TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_coder}"
@@ -779,6 +791,14 @@ build_vllm_args() {
         --max-num-seqs "${MAX_NUM_SEQS}"
         --enable-prefix-caching
     )
+
+    # Ahead of the reasoning branch, and outside it on purpose: a cap bounds a
+    # reply, which has nothing to do with whether the model reasons, and
+    # nesting it there would make it a silent no-op for every other family.
+    if [[ -n "${GENERATION_MAX_TOKENS}" ]]; then
+        VLLM_ARGS+=(--override-generation-config \
+            "{\"max_new_tokens\": ${GENERATION_MAX_TOKENS}}")
+    fi
 
     # Qwen3.5 and newer think by default, and that default is kept: agents that
     # deliberate before acting are closer to what a social simulation is trying
