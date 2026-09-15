@@ -175,6 +175,23 @@ MAX_EXTRACTION="${MAX_EXTRACTION:-10}"
 # throughput matters more than comparability.
 AGENT_HOME_MODE="${AGENT_HOME_MODE:-per-run}"
 
+# How many ask_env calls the env router actor handles at once. Upstream ties
+# this to is_concurrency_safe(), which is False for any module that mutates
+# shared state -- CommonsTragedyEnv among them -- so the actor serialised the
+# whole ask, code generation included.
+#
+# That conflated two guarantees. CodeGenRouter's own execution lock already
+# serialises the code that touches the pool; the generation round trip around
+# it holds nothing shared. The vendored copy separates them, so this can be
+# raised while the pool stays as protected as before.
+#
+# Measured at 16 agents, four runs each: participation rose from a median of
+# 48% to 81% and a round went from 305s to 160s. At 1 the runs stopped
+# submitting entirely in later rounds, which is what the serialised queue
+# costs once agents start timing out behind it.
+AGENTSOCIETY_ENV_ACTOR_MAX_CONCURRENCY="${AGENTSOCIETY_ENV_ACTOR_MAX_CONCURRENCY:-8}"
+export AGENTSOCIETY_ENV_ACTOR_MAX_CONCURRENCY
+
 # Replay records required before a run counts as successful.
 MIN_REPLAY_RECORDS="${MIN_REPLAY_RECORDS:-1}"
 

@@ -306,6 +306,42 @@ assert_home_mode shared shared
     exit 1
 ) || failures=$((failures + 1))
 
+# --- env actor concurrency --------------------------------------------------
+
+# The vendored agentsociety2 separates the actor's concurrency from the
+# router's execution lock. Assert both halves: the value this repository sets,
+# and that the vendored source actually reads it rather than the upstream
+# expression that tied it to is_concurrency_safe().
+(
+    rendered="$(
+        AGENTSOCIETY_ENV_ACTOR_MAX_CONCURRENCY="" \
+            bash -c "source '${SCRIPT_DIR}/common.sh'; printf '%s' \"\${AGENTSOCIETY_ENV_ACTOR_MAX_CONCURRENCY}\""
+    )"
+    if [[ "${rendered}" == "8" ]]; then
+        printf 'ok   %-34s default %s\n' "env actor concurrency" "${rendered}"
+        exit 0
+    fi
+    printf 'FAIL %-34s default %s, expected 8\n' "env actor concurrency" "${rendered}"
+    exit 1
+) || failures=$((failures + 1))
+
+(
+    cli="${SCRIPT_DIR}/../../vendor/AgentSociety/packages/agentsociety2/agentsociety2/society/cli.py"
+    if [[ ! -f "${cli}" ]]; then
+        printf 'ok   %-34s submodule not checked out, skipped\n' "env actor concurrency"
+        exit 0
+    fi
+    # The upstream form gates the value behind all_safe; the vendored form does
+    # not. Checking for the absence of the gate is what makes this meaningful.
+    if grep -q 'max_concurrency = Config.ENV_ACTOR_MAX_CONCURRENCY$' "${cli}" \
+        && ! grep -q 'ENV_ACTOR_MAX_CONCURRENCY if all_safe' "${cli}"; then
+        printf 'ok   %-34s vendored cli reads the variable\n' "env actor concurrency"
+        exit 0
+    fi
+    printf 'FAIL %-34s vendored cli still gates it on all_safe\n' "env actor concurrency"
+    exit 1
+) || failures=$((failures + 1))
+
 if [[ "${failures}" -gt 0 ]]; then
     printf '\n%d check(s) failed\n' "${failures}"
     exit 1

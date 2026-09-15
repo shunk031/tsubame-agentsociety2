@@ -363,6 +363,27 @@ served models: ['Qwen/Qwen3.6-35B-A3B-FP8']
   - `AGENT_HOME_MODE=shared` で従来どおり共有に戻せる（スループット優先のとき）
   - 起動ログに `state <mode> (<path>)` を出すので、どちらで走ったか後から分かる
 
+**env router の actor が ask_env を 1 本ずつしか捌かない**
+
+- `EnvRouterActor` の並列度は `is_concurrency_safe()` で決まる。共有状態を書き換える
+  モジュール（`CommonsTragedyEnv` を含む）では False ➜ `max_concurrency=1`
+- **これは 2 つの保証を混同している**
+  - `CodeGenRouter._exec_lock_ctx()` が `_execute_code` を直列化する。プールを触るのはここ
+  - その外側（embedding 検索・5〜25 秒のコード生成）は共有状態を持たない
+  - ➜ actor まで直列化しても安全性は増えず、生成の待ち時間だけ払う
+- 実測（16 エージェント・4 ラウンド・各 4 ラン）
+
+  | | 参加率（中央値） | 1 ラウンド |
+  | --- | --- | --- |
+  | `max_concurrency=1` | 48% | 305 秒 |
+  | `max_concurrency=8` | **81%** | **160 秒** |
+
+  - 並列度 1 では後半のラウンドで**提出がゼロになる**。60 秒のリクエストタイムアウトを
+    直列の待ち行列の後ろで使い切るため
+  - 採取合計はプールを超えず、整合は保たれた（実行ロックが効いている証拠）
+- ➜ vendor 側で 2 つを分離し、`AGENTSOCIETY_ENV_ACTOR_MAX_CONCURRENCY`（既定 8）で指定する
+  - `is_concurrency_safe()` は False のまま。実行ロックの挙動は変えていない
+
 エージェントが動かない・参加率が落ちるといった agentsociety2 側の挙動は
 `docs/agentsociety2-behaviour.md` にまとめてある。ステップ構成が届かない件、
 `ask_env` の契約、エージェント名の照合、プロンプトに禁止形を書いてしまう件。
