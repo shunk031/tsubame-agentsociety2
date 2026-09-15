@@ -362,9 +362,10 @@ assert_batch_size 0 8 256
 # The JIT compilers vLLM invokes at startup size their own parallelism from
 # nproc, which reports the whole physical node rather than the slots Grid
 # Engine granted -- the same trap detect_cpu_cores already covers for Ray.
-# ninja then launches ~200 nvcc processes inside a job-sized memory cgroup and
-# the kernel kills cicc with signal 9, which surfaces as an unexplained
-# "Ninja build failed" and a vLLM that never comes up.
+# ninja then launches ~200 nvcc processes competing for the node's physical
+# memory -- nothing caps the job -- and the kernel OOM killer takes cicc with
+# signal 9, which surfaces as an unexplained "Ninja build failed" and a vLLM
+# that never comes up.
 (
     job="${SCRIPT_DIR}/../../jobs/run_sim.sh"
     missing=0
