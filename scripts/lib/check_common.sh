@@ -424,6 +424,53 @@ assert_batch_size 0 8 256
     exit 1
 ) || failures=$((failures + 1))
 
+# Every claim made so far about whether the GPU is busy has come from a proxy:
+# queue depth in vLLM's log, KV-cache occupancy, generated tokens per second.
+# None of them is utilisation, and reasoning about saturation without it has
+# already produced one wrong root cause. Sample the device directly.
+(
+    missing=0
+    grep -q 'start_gpu_sampler' "${SCRIPT_DIR}/common.sh" || missing=1
+    grep -q 'start_gpu_sampler' "${SCRIPT_DIR}/../../jobs/run_sim.sh" || missing=1
+    # It has to run for the whole simulation, so it must start before the CLI
+    # rather than alongside the summary at the end.
+    cli_line="$(grep -n 'agentsociety2.society.cli' "${SCRIPT_DIR}/../../jobs/run_sim.sh" | head -1 | cut -d: -f1)"
+    sampler_line="$(grep -n 'start_gpu_sampler' "${SCRIPT_DIR}/../../jobs/run_sim.sh" | head -1 | cut -d: -f1)"
+    [[ -n "${cli_line}" ]] && [[ -n "${sampler_line}" ]] && (( sampler_line < cli_line )) || missing=1
+    if [[ "${missing}" -eq 0 ]]; then
+        printf 'ok   %-34s sampled for the whole run\n' "gpu telemetry"
+        exit 0
+    fi
+    printf 'FAIL %-34s not sampled, or started too late\n' "gpu telemetry"
+    exit 1
+) || failures=$((failures + 1))
+
+(
+    # A sampler that dies with the job but leaves no file is worse than none:
+    # it looks like it ran. Assert the query actually asks for utilisation, not
+    # only memory, which is the proxy that has been misleading us.
+    missing=0
+    grep -q 'utilization.gpu' "${SCRIPT_DIR}/common.sh" || missing=1
+    grep -q 'utilization.memory' "${SCRIPT_DIR}/common.sh" || missing=1
+    # The job names the file; the library only writes where it is told.
+    grep -q 'gpu.csv' "${SCRIPT_DIR}/../../jobs/run_sim.sh" || missing=1
+    # Defining a stopper is not stopping. start_vllm and start_embedding_vllm
+    # each install a bare `trap ... EXIT` that overwrites any other handler, so
+    # the only place the sampler can be torn down is inside those handlers.
+    for handler in stop_vllm stop_all_vllm; do
+        awk -v fn="^${handler}\\(\\)" '
+            $0 ~ fn {inside=1} inside && /stop_gpu_sampler/ {found=1} inside && /^}/ {exit}
+            END {exit !found}' "${SCRIPT_DIR}/common.sh" || missing=1
+    done
+    if [[ "${missing}" -eq 0 ]]; then
+        printf 'ok   %-34s records SM and memory utilisation\n' "gpu telemetry"
+        exit 0
+    fi
+    printf 'FAIL %-34s does not record utilisation\n' "gpu telemetry"
+    exit 1
+) || failures=$((failures + 1))
+
+
 if [[ "${failures}" -gt 0 ]]; then
     printf '\n%d check(s) failed\n' "${failures}"
     exit 1
