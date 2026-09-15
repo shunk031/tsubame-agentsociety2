@@ -213,3 +213,38 @@ def test_a_lone_extraction_is_not_a_uniformity_signature():
 def _lines(run_dir):
     path = run_dir / "replay" / "commons_tragedy_env_state.00.jsonl"
     return [line for line in path.read_text().splitlines() if line.strip()]
+
+
+def test_social_media_events_count_as_interaction(tmp_path):
+    """SocialMediaSpace writes no env-state counter, only an event table.
+
+    Its posts, follows and likes land in ``social_media_event`` rather than in
+    a column like ``total_messages_sent``, so a check that looks only at
+    environment state sees an empty simulation and fails a run in which every
+    agent acted.
+    """
+    replay = tmp_path / "replay"
+    replay.mkdir()
+    (replay / "social_media_space_env_state.00.jsonl").write_text(
+        json.dumps({"step": 0}) + "\n"
+    )
+    (replay / "social_media_event.00.jsonl").write_text(
+        "\n".join(
+            json.dumps({"id": i, "step": 1, "sender_id": i, "action": "create_post"})
+            for i in range(5)
+        )
+        + "\n"
+    )
+
+    assert check_replay._report_interaction(replay, 0.0) == 0
+
+
+def test_a_social_media_run_where_nobody_posted_still_fails(tmp_path):
+    replay = tmp_path / "replay"
+    replay.mkdir()
+    (replay / "social_media_space_env_state.00.jsonl").write_text(
+        json.dumps({"step": 0}) + "\n"
+    )
+    (replay / "social_media_event.00.jsonl").write_text("")
+
+    assert check_replay._report_interaction(replay, 0.0) == 1

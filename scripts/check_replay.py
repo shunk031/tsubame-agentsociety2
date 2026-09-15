@@ -157,6 +157,19 @@ def _agent_names(replay_dir: Path) -> set[str]:
     return names
 
 
+def _count_rows(replay_dir: Path, table: str) -> int:
+    """Count the rows a table wrote across its shards.
+
+    @arg replay_dir Directory holding the run's ``<table>.<shard>.jsonl`` files.
+    @arg table Table name, without the shard suffix.
+    """
+    total = 0
+    for shard in sorted(replay_dir.glob(f"{table}.*.jsonl")):
+        with shard.open() as handle:
+            total += sum(1 for line in handle if line.strip())
+    return total
+
+
 def _report_interaction(replay_dir: Path, min_participation: float) -> int:
     """Check that agents actually acted on each other, not merely that rows exist.
 
@@ -191,17 +204,26 @@ def _report_interaction(replay_dir: Path, min_participation: float) -> int:
 
     rounds = max((row.get("round_number", 0) for row in states), default=0)
     messages = max((row.get("total_messages_sent", 0) for row in states), default=0)
+    # SocialMediaSpace keeps no running counter in environment state: every
+    # post, follow and like is a row in its own event table. Counting only
+    # environment state would call a run in which all 128 agents posted an
+    # empty simulation.
+    events = _count_rows(replay_dir, "social_media_event")
 
-    if rounds == 0 and messages == 0:
+    if rounds == 0 and messages == 0 and events == 0:
         print(
             "\nFAIL the simulation completed but no agent acted: no rounds were "
-            "resolved and no messages were sent. The plumbing works; the "
-            "scenario did not get the agents to do anything.",
+            "resolved, no messages were sent and no social media events were "
+            "recorded. The plumbing works; the scenario did not get the agents "
+            "to do anything.",
             file=sys.stderr,
         )
         return 1
 
-    print(f"\ninteraction confirmed: {rounds} rounds, {messages} messages")
+    print(
+        f"\ninteraction confirmed: {rounds} rounds, {messages} messages, "
+        f"{events} social media events"
+    )
 
     return _report_participation(replay_dir, states, min_participation)
 
