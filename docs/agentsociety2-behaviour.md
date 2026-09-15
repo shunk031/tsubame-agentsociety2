@@ -168,6 +168,51 @@ Task: It is now round 1. First pick a whole number between 1 and 10 ...
 - `CodeGenRouter` の `template_cache_similarity_threshold` は既定 **0.85**
   - `EnvRouterActor` はこれを渡さずに構築するので既定が固定される。環境変数も無い
 - ➜ 128 体で 188 件のミスが残るのはこれ。テンプレートの種類数から予想される数より桁が多い
+- 下げると減る。16 体・**各ラン冷たいキャッシュ**での実測
+
+  | 閾値 | ミス |
+  | --- | --- |
+  | 0.85（上流の既定） | 27, 31 |
+  | 0.60 | 6 |
+
+  - 0.60 は 1 ラン ➜ 方向は一貫するが確定ではない
+  - `EnvRouterActor` は `codegen_kwargs` を受け取る口を持つのに、この値を載せていない
+
+**`EnvRouterActor` が 3 つの値をハードコードしている**
+
+`ask_env` の速さと成否を決める 3 つが、いずれも設定から届かない。
+
+| 値 | 既定 | 届かない理由 |
+| --- | --- | --- |
+| ルータ実装 | `CodeGenRouter` | `env_router_actor.py` が直接 import |
+| `max_concurrency` | 1 | `is_concurrency_safe()` に巻き込まれている |
+| `template_cache_similarity_threshold` | 0.85 | `codegen_kwargs` に載っていない |
+
+`EnvRouterProxy` は完成済みの actor ハンドルを受け取るだけなので、外から差し替える口も無い。
+
+**並列度が最も効く。** 16 エージェント・4 ラウンド・各 4 ラン:
+
+| | 参加率（中央値） | 1 ラウンド |
+| --- | --- | --- |
+| `max_concurrency=1` | 48% | 305 秒 |
+| `max_concurrency=8` | **81%** | **160 秒** |
+
+- 1 では後半のラウンドで**提出がゼロ**になる。60 秒のリクエストタイムアウトを
+  直列の待ち行列の後ろで使い切るため
+- 採取合計はプールを超えない ➜ `_exec_lock_ctx()` が別に守っている
+- ➜ 実行ロックと actor 並列度は**別の機構**。同じフラグで切り替えるのが設計上の混同
+
+**代替ルータは動く。** `ReActRouter` は `env_benchmark` 用に見えるが、16 体で完走した。
+
+| ルータ | 参加率 | `ask_env` | キャッシュミス |
+| --- | --- | --- | --- |
+| `codegen` | 12%, 83% | 659〜1222 秒 | 26, 17 |
+| `react` | 86%, 78% | 891〜999 秒 | 0（そもそも使わない） |
+
+- エラーは 0 件。`ask()` の署名は両者同一で、`RouterBase` が両方の引数を受け取る
+  （`ReActRouter` が `super().__init__()` に転送していないだけ）
+- **速くはならなかった。** コード生成の往復は消えるが、function calling の往復が入る
+- 各 2 ラン。範囲が重なるので優劣は言えない
 
 **`router_codegen.py` は確率的に init を落とす**
 
