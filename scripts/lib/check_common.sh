@@ -1304,6 +1304,44 @@ assert_worker_budget 8 0 8
     exit 1
 ) || failures=$((failures + 1))
 
+# Every ad-hoc monitor written during a long session omitted something, and
+# the omissions cost more than the runs did: a job reported as "still starting"
+# an hour after it was submitted, two hours spent polling one that had already
+# exited, and counts quoted with no elapsed time, which made two configurations
+# look different when the numbers came from different spans. Prose telling the
+# reader to remember does not survive the tenth hand-written ssh pipeline. The
+# status command has to carry all three by construction.
+(
+    remote="${SCRIPT_DIR}/../remote/status_remote.sh"
+    missing=0
+    [[ -f "${remote}" ]] || missing=1
+    if [[ -f "${remote}" ]]; then
+        # Alive or dead, from the scheduler rather than from the log's age.
+        grep -q 'qstat' "${remote}" || missing=1
+        # Elapsed, so a number can be read as a rate.
+        grep -q 'elapsed\|started' "${remote}" || missing=1
+        # Log age, which is what tells a hung job from a working one when the
+        # scheduler still calls it running.
+        grep -q 'stat -c %Y\|mtime' "${remote}" || missing=1
+    fi
+    if [[ "${missing}" -eq 0 ]]; then
+        printf 'ok   %-34s liveness, elapsed and log age\n' "status command"
+        exit 0
+    fi
+    printf 'FAIL %-34s does not carry all three\n' "status command"
+    exit 1
+) || failures=$((failures + 1))
+
+(
+    local_sh="${SCRIPT_DIR}/../status.sh"
+    if [[ -x "${local_sh}" ]]; then
+        printf 'ok   %-34s scripts/status.sh is executable\n' "status command"
+        exit 0
+    fi
+    printf 'FAIL %-34s scripts/status.sh missing\n' "status command"
+    exit 1
+) || failures=$((failures + 1))
+
 if [[ "${failures}" -gt 0 ]]; then
     printf '\n%d check(s) failed\n' "${failures}"
     exit 1
