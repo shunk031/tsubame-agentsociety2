@@ -285,6 +285,13 @@ export ANONYMIZED_TELEMETRY="${ANONYMIZED_TELEMETRY:-False}"
 # agents a depletable shared pool to draw from, so their choices interact:
 # what one takes changes what is left for the others.
 ENV_MODULE="${ENV_MODULE:-CommonsTragedyEnv}"
+# Language the agents write their posts in. English is what every recorded run
+# produced, so it stays the default -- a silent change would invalidate every
+# comparison against them. It reaches the content only: the ask_env sentences
+# must stay byte-identical between steps for the codegen template cache, and
+# the argument names are keys the environment looks up.
+AGENT_LANGUAGE="${AGENT_LANGUAGE:-en}"
+export AGENT_LANGUAGE
 
 # Empty means "whatever the environment expects".
 NUM_AGENTS="${NUM_AGENTS:-0}"

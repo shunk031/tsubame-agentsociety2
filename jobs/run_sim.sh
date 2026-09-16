@@ -148,6 +148,7 @@ log "generating the configuration"
 "${VENV}/bin/python" "${REPO_ROOT}/scripts/gen_config.py" \
     --out-dir "${RUN_DIR}" \
     --env-module "${ENV_MODULE}" \
+    --language "${AGENT_LANGUAGE:-en}" \
     --num-agents "${NUM_AGENTS}" \
     --num-rounds "${NUM_ROUNDS}" \
     --tick "${TICK_SECONDS}" \

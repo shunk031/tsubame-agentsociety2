@@ -130,10 +130,18 @@ def test_role_exhibits_no_placeholder_to_copy(env_module):
     An earlier version listed `{amount}` and `N` as placeholders not to write.
     The next run produced `submit an extraction of N units for Agent-1` — the
     model lifted the example straight out of the prohibition. Say what to send.
+
+    SocialMediaSpace is exempt, and the distinction is the point: there the
+    braces are not a prohibition to be copied but the instruction template the
+    environment's own skill document prescribes, which the agent is meant to
+    send literally so the codegen cache can match it. The failure this guards
+    against is a role that shows a form and forbids it; a role that shows a
+    form and requires it is the opposite.
     """
     role = role_for(env_module, num_agents=4)
 
-    assert "{" not in role.replace("ctx['variables']", "")
+    if env_module != "SocialMediaSpace":
+        assert "{" not in role.replace("ctx['variables']", "")
     assert "placeholder" not in role
 
 
@@ -166,18 +174,19 @@ def test_role_never_names_an_environment_tool():
     checked, not only the first module's: a role that named a tool belonging to
     its own environment would otherwise slip through.
     """
+    # SocialMediaSpace is deliberately exempt. Its own skill document,
+    # contrib/env/social_media/agent_skills/social-media/SKILL.md, gives the
+    # instruction for every tool as a fixed template naming that tool, because
+    # a stable string is what lets the codegen template cache match. The
+    # "Unknown tool" failure this test was written for came from CommonsTragedy,
+    # where the role named a tool it wanted called as a ReAct action instead of
+    # sending it through ask_env.
     tools = (
         "submit_extraction",
         "get_pool_resources",
         "get_round_history",
         "send_message",
         "receive_messages",
-        "create_post",
-        "refresh_feed",
-        "like_post",
-        "follow_user",
-        "comment_on_post",
-        "observe_user",
     )
     for env_module in gen_config.ENVIRONMENTS:
         role = role_for(env_module, num_agents=4)
@@ -195,10 +204,10 @@ def test_social_media_role_makes_agents_read_before_they_write():
     """
     role = role_for("SocialMediaSpace", num_agents=128)
 
-    feed = role.index("feed")
-    post = role.index("post")
-    assert feed < post, "the role writes before it reads"
-    assert "twice" in role
+    observe = role.index("<observe>")
+    feed = role.index("refresh_feed")
+    post = role.index("create_post")
+    assert observe < feed < post, "the role writes before it reads"
 
 
 def test_social_media_role_carries_the_ids_the_environment_keys_on():
@@ -206,7 +215,7 @@ def test_social_media_role_carries_the_ids_the_environment_keys_on():
 
     assert "user_id" in role
     assert "author_id" in role
-    assert "ctx['variables']" in role
+    assert "variables" in role
 
 
 def test_social_media_binds_agents_to_their_environment_identities():
@@ -275,3 +284,69 @@ def test_simple_social_space_still_generates(tmp_path):
 def test_nonsense_counts_are_rejected(tmp_path, bad):
     with pytest.raises(SystemExit):
         gen_config.parse_args(["--out-dir", str(tmp_path), *bad])
+
+
+def test_language_is_english_by_default():
+    """Every run so far produced English, and that stays the default.
+
+    Making the language a parameter is only useful if turning it on is a
+    deliberate act; a default that silently changed would invalidate
+    comparisons against every run already recorded.
+    """
+    role = role_for("SocialMediaSpace", num_agents=128)
+
+    assert "Japanese" not in role
+    assert "日本語" not in role
+
+
+def test_japanese_constrains_the_content_not_the_protocol(monkeypatch):
+    """The language must reach what agents write, not how they call the tool.
+
+    The instruction sentence has to stay byte-identical between steps or the
+    codegen template cache can never match it, and the tool's own arguments are
+    keys the environment looks up. So the language requirement belongs to the
+    content, and the sentence it travels in must be untouched.
+    """
+    args = gen_config.parse_args(
+        ["--out-dir", "/tmp/x", "--env-module", "SocialMediaSpace", "--language", "ja"]
+    )
+    role = gen_config.build_role(gen_config.ENVIRONMENTS["SocialMediaSpace"], 128, args)
+
+    assert "Japanese" in role
+    # The instruction templates must survive verbatim.
+    assert "refresh_feed user_id={user_id}" in role
+    assert "create_post author_id={user_id}" in role
+    assert "<observe>" in role
+    # And the keys the environment reads must not have been translated.
+    assert "author_id" in role
+    assert "user_id" in role
+
+
+def test_social_media_role_uses_the_upstream_instruction_templates():
+    """The environment ships a skill document naming the exact instructions.
+
+    `contrib/env/social_media/agent_skills/social-media/SKILL.md` gives the
+    template for every tool and states the rule behind them: volatile values go
+    in `variables`, the wording of the instruction stays fixed. That is what
+    makes the codegen template cache match -- upstream reports it removes 66.5%
+    of LLM calls. A hand-written paraphrase produces a slightly different string
+    every step, which is why a measured run scored at most 0.68 similarity
+    against a 0.85 threshold and hit the cache zero times.
+    """
+    role = role_for("SocialMediaSpace", num_agents=128)
+
+    assert "<observe>" in role
+    assert "refresh_feed user_id={user_id}" in role
+    assert "create_post author_id={user_id}" in role
+    # The paraphrases that bypassed both the built-in runner and the cache.
+    assert "refresh the feed using" not in role
+    assert "create a post using" not in role
+
+
+def test_social_media_role_sends_values_through_variables():
+    role = role_for("SocialMediaSpace", num_agents=128)
+
+    assert "variables" in role
+    # ctx carries the agent identity; the values the instruction interpolates
+    # do not travel there.
+    assert "ctx['variables']" not in role
