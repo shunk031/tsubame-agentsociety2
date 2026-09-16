@@ -350,3 +350,46 @@ def test_social_media_role_sends_values_through_variables():
     # ctx carries the agent identity; the values the instruction interpolates
     # do not travel there.
     assert "ctx['variables']" not in role
+
+
+def test_social_media_role_turns_the_template_cache_on():
+    """The cache does nothing until the caller asks for it.
+
+    `ask_env` takes `template_mode` and it defaults to False, and
+    `CacheCodeProvider.on_final` only records an entry when it is true. With
+    the default, nothing is ever written to the cache, so every lookup reports
+    a miss no matter how stable the instruction is or where the similarity
+    threshold sits. A measured run sent the documented templates, byte-
+    identical, eighty-four times and recorded zero hits for exactly this
+    reason.
+    """
+    role = role_for("SocialMediaSpace", num_agents=128)
+
+    assert "template_mode=True" in role
+    # Not on the observe call: the router answers <observe> from a built-in
+    # runner and on_final skips caching it either way.
+    observe = role.index("<observe>")
+    feed = role.index("refresh_feed")
+    assert "template_mode=True" not in role[observe:feed]
+
+
+def test_social_media_role_pins_the_variable_keys():
+    """The cache rejects an entry whose keys neither contain nor are contained.
+
+    `CacheCodeProvider` compares the incoming variable keys against a candidate's
+    with `issubset` in both directions, so {user_id, content} and
+    {author_id, content, tags} are incompatible and the lookup reports
+    `variable_keys_incompatible` however similar the instructions are. Leaving
+    the role's examples as `variables={...}` lets every agent invent its own
+    key set; a measured run produced 53 such rejections once the cache was
+    finally being written to. The environment's skill document names the keys,
+    so the role names them too.
+    """
+    role = role_for("SocialMediaSpace", num_agents=128)
+
+    assert "variables={...}" not in role
+    # From contrib/env/social_media/agent_skills/social-media/SKILL.md.
+    assert '"user_id"' in role
+    assert '"content"' in role
+    assert '"tags"' in role
+    assert '"post_id"' in role
