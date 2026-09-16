@@ -177,10 +177,17 @@ default_gpu_resource() {
 # @description Sample GPU utilisation into the run directory until the job ends.
 # @description
 #   vLLM's log offers queue depth, KV-cache occupancy and tokens per second.
-#   None of those is utilisation: a run can hold nineteen requests, report seven
-#   percent of the KV cache and still leave the SMs mostly idle, and reasoning
-#   about saturation from those proxies has already produced one wrong answer
-#   here. nvidia-smi is the only thing on this node that measures the device.
+#   None of those measures the device, so nvidia-smi is sampled instead -- but
+#   utilization.gpu does not measure it either. NVIDIA defines it as the
+#   fraction of time at least one kernel was resident, not how much of the GPU
+#   that kernel used, so a single decode stream reports 97% while most of the
+#   device idles. That number was read as saturation for a whole day.
+#
+#   Temperature and SM clock cannot be read that way round. An H100 doing real
+#   work sits at 70-80 C with its clock boosted; one merely kept busy stays cool
+#   and downclocked. Power sits between the two: informative, but a MoE with
+#   three billion active parameters draws far less than a dense model doing the
+#   same useful work, so it compares poorly across models.
 #
 #   Stopped from inside stop_vllm / stop_all_vllm, which are what the EXIT trap
 #   actually runs, so the sampler cannot outlive the run and keep writing into a
@@ -195,7 +202,7 @@ start_gpu_sampler() {
         return 0
     fi
     nvidia-smi \
-        --query-gpu=timestamp,index,utilization.gpu,utilization.memory,memory.used,power.draw \
+        --query-gpu=timestamp,index,utilization.gpu,utilization.memory,memory.used,power.draw,temperature.gpu,clocks.sm \
         --format=csv,nounits -l 5 >"${out}" 2>/dev/null &
     GPU_SAMPLER_PID=$!
     log "gpu     sampling every 5s to ${out}"
@@ -295,6 +302,51 @@ export AGENT_LANGUAGE
 
 # Empty means "whatever the environment expects".
 NUM_AGENTS="${NUM_AGENTS:-0}"
+
+# The env router actor serves every agent's environment call, and upstream caps
+# it at 8. Declaring a module concurrency-safe opens the gate but leaves that
+# ceiling, so a population of 128 queues eight at a time behind one actor --
+# which is what held vLLM at a median of 14 concurrent requests while a
+# microbenchmark on the same hardware reached 128 and drew 574 W against 404 W.
+#
+# The ceiling follows the population because one env call per agent is the most
+# the population can ask for; a constant would need revisiting every time the
+# scenario grows. Never below upstream's 8, so a small population does not end
+# up more serial than the default this replaces.
+if (( NUM_AGENTS > 8 )); then
+    AGENTSOCIETY_ENV_ACTOR_MAX_CONCURRENCY="${AGENTSOCIETY_ENV_ACTOR_MAX_CONCURRENCY:-${NUM_AGENTS}}"
+else
+    AGENTSOCIETY_ENV_ACTOR_MAX_CONCURRENCY="${AGENTSOCIETY_ENV_ACTOR_MAX_CONCURRENCY:-8}"
+fi
+export AGENTSOCIETY_ENV_ACTOR_MAX_CONCURRENCY
+
+# Upstream wraps every LLM call in an AIMD semaphore that treats a slow reply as
+# congestion: a call is "slow" when its latency exceeds baseline x 4.0, and one
+# tenth of a round being slow cuts the limit by 30%. That reflex protects a
+# shared remote API. Ours is a vLLM on the GPUs this job holds, and the test is
+# a ratio against a baseline measured from the same traffic -- so it tracks how
+# much reply lengths vary, not whether the backend is struggling. Every log line
+# reads `429=0/N`; the backend never once refused a request while the limit
+# walked 268 -> 187 -> 130.
+#
+# Shortening replies does not help, because the baseline falls with them: with
+# thinking off the measured DECREASE count went up, 21 to 34. Only the relative
+# test itself can go, and upstream disables it on exactly `inf`.
+export AGENTSOCIETY_LLM_LATENCY_DEGRADE_FACTOR="${AGENTSOCIETY_LLM_LATENCY_DEGRADE_FACTOR:-inf}"
+
+# With the ratio test off, 429s remain the backoff signal -- the one that means
+# the backend actually declined the work.
+#
+# AIMD increases additively, so the initial value is where every run starts and
+# has to climb from. Upstream starts at 16, which is below what a population of
+# 128 can already supply, and the climb is spent at a concurrency the GPU is not
+# filled by. One LLM call per agent is the most the population can ask for.
+if (( NUM_AGENTS > 16 )); then
+    AGENTSOCIETY_LLM_RAY_CONCURRENCY="${AGENTSOCIETY_LLM_RAY_CONCURRENCY:-${NUM_AGENTS}}"
+else
+    AGENTSOCIETY_LLM_RAY_CONCURRENCY="${AGENTSOCIETY_LLM_RAY_CONCURRENCY:-16}"
+fi
+export AGENTSOCIETY_LLM_RAY_CONCURRENCY
 
 # One round is a run step followed by a questionnaire. The questionnaire is
 # where the data comes from; a run on its own records almost nothing. There is
@@ -835,11 +887,32 @@ assert_env_matches_source() {
 build_vllm_args() {
     local dp_size="$1"
 
+    # Two ways to spend several GPUs, and they are not interchangeable for this
+    # workload. Data parallelism runs independent replicas, each with its own KV
+    # and prefix cache. Tensor parallelism runs one replica across the devices:
+    # a single cache, and the bandwidth and compute of all of them behind every
+    # request.
+    #
+    # Measured here, an environment event costs about 74k prefill tokens against
+    # 9k generated, and the prefix-cache hit rate is 7%. Quartering that cache is
+    # a loss four times the hardware does not buy back -- the whole-node runs
+    # reached step 1 and 2 while a one-GPU run started the same hour reached
+    # step 4. Tensor parallelism is also the only form that fits a model too
+    # large for one device.
+    #
+    # PARALLELISM=data restores the other shape. Keeping it reachable is what
+    # makes this a measurable choice rather than a belief.
+    case "${PARALLELISM:-tensor}" in
+        data) PARALLEL_FLAG="--data-parallel-size" ;;
+        tensor) PARALLEL_FLAG="--tensor-parallel-size" ;;
+        *) die "PARALLELISM must be tensor or data, not ${PARALLELISM}" ;;
+    esac
+
     VLLM_ARGS=(
         serve "${MODEL}"
         --host "${VLLM_HOST}"
         --port "${VLLM_PORT}"
-        --data-parallel-size "${dp_size}"
+        "${PARALLEL_FLAG}" "${dp_size}"
         --max-model-len "${MAX_MODEL_LEN}"
         --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
         --max-num-seqs "${MAX_NUM_SEQS}"

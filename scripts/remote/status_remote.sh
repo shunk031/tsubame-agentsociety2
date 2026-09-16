@@ -21,7 +21,7 @@ RUNS_DIR="${1:?runs directory required}"
 NOW="$(date +%s)"
 
 printf '%-9s %-6s %-9s %-8s %-9s %-7s %s\n' \
-    JOB STATE ELAPSED LOGAGE POSTS RATE/h POWER
+    JOB STATE ELAPSED LOGAGE EVENTS RATE/h POWER
 
 # qstat is the authority on what is alive; the run directories are the
 # authority on what exists. A job appears here if either knows about it.
@@ -53,8 +53,14 @@ for dir in "${RUNS_DIR}"/sim-* "${RUNS_DIR}"/bench-* "${RUNS_DIR}"/curl-*; do
         elapsed="$(( (NOW - $(date -d "${started}" +%s)) / 60 ))m"
     fi
 
+    # From the replay rather than from a phrase in the log. The first version
+    # counted lines matching "created post", which is English, so a run told to
+    # write in Japanese reported zero activity for its whole life and was read
+    # as broken. What a run produced must not depend on the language it wrote in.
     posts="-"
-    [[ -n "${log}" ]] && posts="$(grep -c 'created post' "${log}" 2>/dev/null)"
+    if compgen -G "${dir}/replay/social_media_event.*.jsonl" >/dev/null 2>&1; then
+        posts="$(cat "${dir}"/replay/social_media_event.*.jsonl 2>/dev/null | wc -l)"
+    fi
 
     # The number that can actually be compared between two runs.
     rate="-"

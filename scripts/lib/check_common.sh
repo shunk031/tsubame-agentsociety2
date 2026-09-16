@@ -59,8 +59,10 @@ assert_flag "Qwen/Qwen3.6-35B-A3B-FP8" 4 "--enable-expert-parallel" present
 assert_flag "Qwen/Qwen3.6-35B-A3B-FP8" 1 "--enable-expert-parallel" absent
 assert_flag "Qwen/Qwen3.5-4B" 4 "--enable-expert-parallel" absent
 
-# Data parallel size must reach the server.
-assert_flag "Qwen/Qwen3.5-4B" 4 "--data-parallel-size 4" present
+# The GPU count must reach the server whichever way it is spent. Tensor
+# parallelism is the default (see the parallelism assertions below for why);
+# this pins that the count itself is not dropped on the way.
+assert_flag "Qwen/Qwen3.5-4B" 4 "--tensor-parallel-size 4" present
 
 # AgentSociety sends tool_choice="auto" on every agent step; vLLM rejects those
 # outright unless both of these are set.
@@ -455,6 +457,14 @@ assert_batch_size 0 8 256
     missing=0
     grep -q 'utilization.gpu' "${SCRIPT_DIR}/common.sh" || missing=1
     grep -q 'utilization.memory' "${SCRIPT_DIR}/common.sh" || missing=1
+    # utilization.gpu is the fraction of time at least one kernel was running,
+    # not how much of the device that kernel used: a single decode stream
+    # reports 97% while most of the GPU idles. Temperature and clock cannot be
+    # faked that way -- an H100 doing real work sits at 70-80 C and boosts its
+    # SM clock, one merely kept busy stays cool and downclocked. A whole day's
+    # conclusions rested on the first number alone.
+    grep -q 'temperature.gpu' "${SCRIPT_DIR}/common.sh" || missing=1
+    grep -q 'clocks.sm' "${SCRIPT_DIR}/common.sh" || missing=1
     # The job names the file; the library only writes where it is told.
     grep -q 'gpu.csv' "${SCRIPT_DIR}/../../jobs/run_sim.sh" || missing=1
     # Defining a stopper is not stopping. start_vllm and start_embedding_vllm
@@ -1304,6 +1314,165 @@ assert_worker_budget 8 0 8
     exit 1
 ) || failures=$((failures + 1))
 
+# Multiple GPUs can be spent two ways and they are not interchangeable here.
+# --data-parallel-size N runs N independent replicas, each with its own KV and
+# prefix cache; --tensor-parallel-size N runs one replica across N devices with
+# a single cache and N times the bandwidth and compute per request.
+#
+# This workload spends 74k prefill tokens per environment event against 9k
+# generated -- eight to one -- and its measured prefix-cache hit rate is 7%.
+# Splitting that cache four ways is a loss that four times the hardware does not
+# buy back: the whole-node runs reached step 1 and 2 while a single-GPU run
+# started at the same hour reached step 4. Tensor parallelism is also the only
+# form that fits a model too large for one device, which is where this is going.
+# @description Assert how build_vllm_args spends a given number of GPUs.
+# @arg $1 int GPU count.
+# @arg $2 string Flag that must appear.
+# @arg $3 string Flag that must not appear. Empty to skip.
+assert_parallelism() {
+    local gpus="$1" want="$2" avoid="$3" rendered
+    rendered="$(
+        MODEL=Qwen/Qwen3.6-27B bash -c \
+            "source '${SCRIPT_DIR}/common.sh'; build_vllm_args '${gpus}'; printf '%s' \"\${VLLM_ARGS[*]}\""
+    )"
+    if [[ "${rendered}" != *"${want}"* ]]; then
+        printf 'FAIL %-34s %s gpu: no %s\n' "parallelism" "${gpus}" "${want}"
+        failures=$((failures + 1))
+        return
+    fi
+    if [[ -n "${avoid}" ]] && [[ "${rendered}" == *"${avoid}"* ]]; then
+        printf 'FAIL %-34s %s gpu: still has %s\n' "parallelism" "${gpus}" "${avoid}"
+        failures=$((failures + 1))
+        return
+    fi
+    printf 'ok   %-34s %s gpu -> %s\n' "parallelism" "${gpus}" "${want}"
+}
+# One GPU has nothing to split; asking for either form of parallelism on a
+# single device only adds machinery.
+assert_parallelism 1 "--tensor-parallel-size 1" "--data-parallel-size"
+assert_parallelism 4 "--tensor-parallel-size 4" "--data-parallel-size"
+
+# Data parallelism stays reachable: it is the right shape for a population whose
+# requests share no prefix, and keeping it available is what makes the choice
+# measurable rather than assumed.
+(
+    rendered="$(
+        MODEL=Qwen/Qwen3.6-27B PARALLELISM=data bash -c \
+            "source '${SCRIPT_DIR}/common.sh'; build_vllm_args 4; printf '%s' \"\${VLLM_ARGS[*]}\""
+    )"
+    if [[ "${rendered}" == *"--data-parallel-size 4"* ]] \
+        && [[ "${rendered}" != *"--tensor-parallel-size 4"* ]]; then
+        printf 'ok   %-34s PARALLELISM=data -> data parallel\n' "parallelism"
+        exit 0
+    fi
+    printf 'FAIL %-34s PARALLELISM=data ignored\n' "parallelism"
+    exit 1
+) || failures=$((failures + 1))
+
+# The env router actor serves every agent's environment call, and upstream caps
+# it at 8. Declaring the module concurrency-safe opened the gate but left that
+# ceiling in place, so 128 agents queue eight at a time behind it -- which is
+# what holds vLLM at a median of 14 concurrent requests when the measured
+# sustained-power target needs about 128. Raising it is the difference between
+# 404 W and 574 W on the same hardware.
+# @description Assert the env actor concurrency the job would request.
+# @arg $1 string Value of NUM_AGENTS.
+# @arg $2 string Expected concurrency.
+assert_env_actor() {
+    local agents="$1" expected="$2" rendered
+    rendered="$(
+        NUM_AGENTS="${agents}" bash -c \
+            "source '${SCRIPT_DIR}/common.sh'; printf '%s' \"\${AGENTSOCIETY_ENV_ACTOR_MAX_CONCURRENCY}\""
+    )"
+    if [[ "${rendered}" == "${expected}" ]]; then
+        printf 'ok   %-34s %s agents -> %s\n' "env actor concurrency" "${agents}" "${rendered}"
+    else
+        printf 'FAIL %-34s %s agents -> "%s", expected %s\n' \
+            "env actor concurrency" "${agents}" "${rendered}" "${expected}"
+        failures=$((failures + 1))
+    fi
+}
+# One env call per agent is the most the population can ask for, so the ceiling
+# follows the population rather than a constant that has to be revisited every
+# time the scenario grows.
+assert_env_actor 128 128
+assert_env_actor 32 32
+# Never below upstream's 8: a tiny population should not make the actor more
+# serial than the default it replaced.
+assert_env_actor 4 8
+# An unset population means the config decides, and the default is the only
+# answer available here.
+assert_env_actor 0 8
+
+(
+    # Exported, or the Ray actor never sees it.
+    if grep -q 'export AGENTSOCIETY_ENV_ACTOR_MAX_CONCURRENCY' "${SCRIPT_DIR}/common.sh"; then
+        printf 'ok   %-34s exported\n' "env actor concurrency"
+        exit 0
+    fi
+    printf 'FAIL %-34s not exported\n' "env actor concurrency"
+    exit 1
+) || failures=$((failures + 1))
+
+# The AIMD semaphore in upstream's llm_dispatcher counts a call "slow" when its
+# latency exceeds baseline x AGENTSOCIETY_LLM_LATENCY_DEGRADE_FACTOR (4.0 by
+# default) and cuts the concurrency limit by 30% once a tenth of a round is
+# slow. Against a shared remote API that is the right reflex. Against a vLLM we
+# own it measures response-length variance, not congestion: the logs read
+# `429=0/64` every time, and one run walked 268 -> 187 -> 130 without the
+# backend ever refusing a request.
+#
+# docs/agentsociety2-behaviour.md measured the remedy at 21+ DECREASE events
+# down to 0, ReAct failures 48 down to 12. The code disables the relative test
+# on exactly `inf`, so the value has to survive as that literal.
+(
+    rendered="$(bash -c \
+        "source '${SCRIPT_DIR}/common.sh'; printf '%s' \"\${AGENTSOCIETY_LLM_LATENCY_DEGRADE_FACTOR}\"")"
+    if [[ "${rendered}" == "inf" ]]; then
+        printf 'ok   %-34s %s\n' "llm latency backoff" "${rendered}"
+        exit 0
+    fi
+    printf 'FAIL %-34s "%s", expected inf\n' "llm latency backoff" "${rendered}"
+    exit 1
+) || failures=$((failures + 1))
+
+(
+    # Exported, or the Ray worker builds its semaphore from the default.
+    if grep -q 'export AGENTSOCIETY_LLM_LATENCY_DEGRADE_FACTOR' "${SCRIPT_DIR}/common.sh"; then
+        printf 'ok   %-34s exported\n' "llm latency backoff"
+        exit 0
+    fi
+    printf 'FAIL %-34s not exported\n' "llm latency backoff"
+    exit 1
+) || failures=$((failures + 1))
+
+# AIMD climbs additively from its initial value, so starting at upstream's 16
+# spends the early part of every run below the concurrency the population can
+# already supply. One LLM call per agent is the ceiling that population implies.
+# @description Assert the AIMD starting concurrency the job would request.
+# @arg $1 string Value of NUM_AGENTS.
+# @arg $2 string Expected initial concurrency.
+assert_llm_initial() {
+    local agents="$1" expected="$2" rendered
+    rendered="$(
+        NUM_AGENTS="${agents}" bash -c \
+            "source '${SCRIPT_DIR}/common.sh'; printf '%s' \"\${AGENTSOCIETY_LLM_RAY_CONCURRENCY}\""
+    )"
+    if [[ "${rendered}" == "${expected}" ]]; then
+        printf 'ok   %-34s %s agents -> %s\n' "llm initial concurrency" "${agents}" "${rendered}"
+    else
+        printf 'FAIL %-34s %s agents -> "%s", expected %s\n' \
+            "llm initial concurrency" "${agents}" "${rendered}" "${expected}"
+        failures=$((failures + 1))
+    fi
+}
+assert_llm_initial 128 128
+assert_llm_initial 32 32
+# Never below upstream's 16, so a small population does not start more serial
+# than the default this replaces.
+assert_llm_initial 4 16
+assert_llm_initial 0 16
+
 # A language that reaches gen_config's env-var default but never the CLI would
 # still work, and would stop working the moment anything changed how the job is
 # launched. This one is pinned at the call site.
@@ -1353,6 +1522,16 @@ assert_worker_budget 8 0 8
         # Log age, which is what tells a hung job from a working one when the
         # scheduler still calls it running.
         grep -q 'stat -c %Y\|mtime' "${remote}" || missing=1
+        # Counted from the replay, not from a phrase in the log. The first
+        # version grepped for "created post", which is English, so a run told
+        # to write in Japanese reported zero activity for its whole life and
+        # was read as broken. What the run produced must not depend on the
+        # language it produced it in.
+        grep -q 'social_media_event' "${remote}" || missing=1
+        # Comment lines are exempt: the reason this is forbidden is recorded
+        # in one, and an assertion that cannot coexist with its own rationale
+        # gets the rationale deleted.
+        grep -v '^[[:space:]]*#' "${remote}" | grep -q 'created post' && missing=1
     fi
     if [[ "${missing}" -eq 0 ]]; then
         printf 'ok   %-34s liveness, elapsed and log age\n' "status command"
