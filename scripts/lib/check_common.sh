@@ -1191,6 +1191,50 @@ assert_generation_cap 4096 '{"max_new_tokens": 4096}'
     exit 1
 ) || failures=$((failures + 1))
 
+# vLLM waits VLLM_ENGINE_READY_TIMEOUT_S (600 by default) for its engine cores
+# to come up. One GPU already takes 1285 s to become healthy with this model;
+# four data-parallel processes load the same weights off the same filesystem
+# and JIT-compile at the same time, so they never fit in 600. A whole-node run
+# died that way after holding four GPUs for four hours, and the only visible
+# symptom was a shared-memory broadcast warning -- the real error sat 150 lines
+# further up. The wait has to scale with the number of processes, not stay at a
+# single-GPU default.
+# @description Assert the engine-ready timeout for a given GPU count.
+# @arg $1 int Data parallel size.
+# @arg $2 string Lower bound the timeout must meet or exceed.
+assert_ready_timeout() {
+    local dp="$1" minimum="$2" rendered
+    # Through build_vllm_args, not by presetting DP_SIZE before the library is
+    # sourced: jobs/run_sim.sh only computes DP_SIZE after sourcing, so a value
+    # read at source time is always the single-GPU one. An earlier version of
+    # this assertion set DP_SIZE first and passed against exactly that bug.
+    rendered="$(
+        MODEL=Qwen/Qwen3.6-27B bash -c \
+            "source '${SCRIPT_DIR}/common.sh'; build_vllm_args '${dp}' >/dev/null; printf '%s' \"\${VLLM_ENGINE_READY_TIMEOUT_S}\""
+    )"
+    if [[ -n "${rendered}" ]] && (( rendered >= minimum )); then
+        printf 'ok   %-34s dp=%s -> %ss\n' "engine ready timeout" "${dp}" "${rendered}"
+    else
+        printf 'FAIL %-34s dp=%s -> "%s", need >= %s\n' \
+            "engine ready timeout" "${dp}" "${rendered}" "${minimum}"
+        failures=$((failures + 1))
+    fi
+}
+# One GPU measured 1285 s, so even the single-process case needs more than the
+# 600 s default.
+assert_ready_timeout 1 1800
+assert_ready_timeout 4 3600
+
+(
+    # Exported, or the vLLM child never sees it.
+    if grep -q 'export VLLM_ENGINE_READY_TIMEOUT_S' "${SCRIPT_DIR}/common.sh"; then
+        printf 'ok   %-34s exported to the vLLM child\n' "engine ready timeout"
+        exit 0
+    fi
+    printf 'FAIL %-34s not exported\n' "engine ready timeout"
+    exit 1
+) || failures=$((failures + 1))
+
 if [[ "${failures}" -gt 0 ]]; then
     printf '\n%d check(s) failed\n' "${failures}"
     exit 1

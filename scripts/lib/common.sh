@@ -112,6 +112,23 @@ export ENABLE_THINKING="${ENABLE_THINKING:-1}"
 # may run and keeps it.
 GENERATION_MAX_TOKENS="${GENERATION_MAX_TOKENS:-}"
 
+# How long vLLM waits for its engine cores before giving up. The 600 s default
+# is a single-GPU figure and not even that holds here: one GPU took 1285 s to
+# report healthy with the 35B model, because the weights come off a shared
+# filesystem and FlashInfer JIT-compiles on the way. Data parallelism multiplies
+# the contention -- every process reads the same weights and compiles at the
+# same time -- so the budget scales with the process count.
+#
+# Getting this wrong is expensive and quiet: a whole-node run held four GPUs for
+# four hours after timing out, and the only symptom near the end of the log was
+# a shared-memory broadcast warning. The TimeoutError naming this variable sat
+# 150 lines above it.
+# Set in build_vllm_args, where the data parallel size is an argument. It
+# cannot be decided here: jobs/run_sim.sh computes DP_SIZE from the GPUs it was
+# granted only after sourcing this file, so anything read at this point is
+# always the single-GPU answer.
+VLLM_ENGINE_READY_TIMEOUT_BASE="${VLLM_ENGINE_READY_TIMEOUT_BASE:-1800}"
+
 # vLLM ships qwen3_coder and qwen3_xml for this family. The Qwen3.x chat
 # templates emit <tool_call><function=...>, which is what qwen3_coder reads.
 TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_coder}"
@@ -791,6 +808,13 @@ build_vllm_args() {
         --max-num-seqs "${MAX_NUM_SEQS}"
         --enable-prefix-caching
     )
+
+    # One process already needs three times the 600 s default; every extra
+    # data-parallel process contends for the same weights and the same JIT
+    # cache on the way up, so the budget grows with the process count rather
+    # than doubling once.
+    VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-$((VLLM_ENGINE_READY_TIMEOUT_BASE * dp_size))}"
+    export VLLM_ENGINE_READY_TIMEOUT_S
 
     # Ahead of the reasoning branch, and outside it on purpose: a cap bounds a
     # reply, which has nothing to do with whether the model reasons, and
