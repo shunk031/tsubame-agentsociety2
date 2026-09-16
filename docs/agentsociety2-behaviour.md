@@ -115,11 +115,11 @@ Task: It is now round 1. First pick a whole number between 1 and 10 ...
 
 - ➜ ローカル vLLM では `AGENTSOCIETY_LLM_LATENCY_DEGRADE_FACTOR=inf` で相対判定を切る
   - コード側に `!= float("inf")` という無効化の分岐がある
-- **GPU は律速ではない。** 16 体で `Running` は平均 1〜3 本（容量は 32 並列・`max_num_seqs` 256）
-  - ラウンド頭に全員が発火したあと脱同期する。ReAct ループが逐次なので、各エージェントは
-    セマフォではなく自分の直前の呼び出しを待っている
-  - ➜ ラウンド所要は**最も遅い逐次チェーン**で決まる。GPU を増やしても縮まない
-- **128 体でも埋まらない。** 1145 サンプル中 `Waiting` がゼロでないのは 2 回だけ
+- **以下はすべて `max_concurrency=1` での観測**。当時どの env モジュールも
+  `is_concurrency_safe()` を宣言しておらず、env router actor が全エージェントの
+  環境アクセスを直列化していた。原因と解消は後述の「env actor の直列化」を読む
+- 当時の観測: 16 体で `Running` は平均 1〜3 本（容量は 32 並列・`max_num_seqs` 256）
+- **128 体でも埋まらなかった。** 1145 サンプル中 `Waiting` がゼロでないのは 2 回だけ
 
   | 体数 | `Running` 中央値 | 最大 | `Waiting`>0 | KV 最大 |
   | --- | --- | --- | --- | --- |
@@ -128,9 +128,11 @@ Task: It is now round 1. First pick a whole number between 1 and 10 ...
   | 128（embedding 有り） | **3** | 52 | 1 / 664 | 15.4% |
   | 256 | **2** | 80 | 0 / 480 | 19.3% |
 
-  - ➜ 頭数を 16 倍にしても飽和しない。最大値だけが伸びて定常は薄いまま
+  - 頭数を 16 倍にしても飽和しなかった。最大値だけが伸びて定常は薄いまま
   - 256 体の行は wall clock で打ち切られたラン（1 ラウンドのみ）の観測。完走していない
-  - ➜ GPU を増やす判断には、まず飽和させる方法が要る
+- 当時ここから「ラウンド所要は最も遅い逐次チェーンで決まる／GPU を増やしても縮まない」と
+  結論していたが、**これは誤り**だった。薄かったのは env actor が直列だったためで、
+  ワークロードの性質ではない。宣言を入れた後の同じ構成は GPU を使い切る
 
 **参加率もモデル規模で分かれる**
 
@@ -158,8 +160,9 @@ Task: It is now round 1. First pick a whole number between 1 and 10 ...
 
 - **規模が小さいと効かない。** 16 体では有り 1063〜1228 秒 / 無し 1125〜1574 秒で範囲が重なる
   - 同一テンプレートが繰り返される量が効くので、頭数が増えるほど差が開く
-- **GPU は埋まらない。** 同時実行の中央値は 2 → 3、`Running>=8` は 3% → 7%
-  - 直列の待ち行列が短くなるだけで、並列度は上がらない
+- **GPU は埋まらなかった。** 同時実行の中央値は 2 → 3、`Running>=8` は 3% → 7%
+  - これも `max_concurrency=1` での観測。直列の待ち行列が短くなるだけで並列度は上がらない
+  - embedding が効くのはキャッシュのヒット率であって、並列度ではない。この切り分けは今も有効
 
 **残るミスは類似度の閾値で落ちている**
 
@@ -185,22 +188,49 @@ Task: It is now round 1. First pick a whole number between 1 and 10 ...
 | 値 | 既定 | 届かない理由 |
 | --- | --- | --- |
 | ルータ実装 | `CodeGenRouter` | `env_router_actor.py` が直接 import |
-| `max_concurrency` | 1 | `is_concurrency_safe()` に巻き込まれている |
+| `max_concurrency` | 8（既定）だが実効 1 | 全 env モジュールが `is_concurrency_safe()` を宣言しない限り 1 に落ちる |
 | `template_cache_similarity_threshold` | 0.85 | `codegen_kwargs` に載っていない |
 
 `EnvRouterProxy` は完成済みの actor ハンドルを受け取るだけなので、外から差し替える口も無い。
 
-**並列度が最も効く。** 16 エージェント・4 ラウンド・各 4 ラン:
+**env actor の直列化。宣言 1 行が、GPU が埋まるかどうかを決める**
 
-| | 参加率（中央値） | 1 ラウンド |
-| --- | --- | --- |
-| `max_concurrency=1` | 48% | 305 秒 |
-| `max_concurrency=8` | **81%** | **160 秒** |
+`ENV_ACTOR_MAX_CONCURRENCY` の既定は 8 だが、`society/cli.py` が全 env モジュールの宣言を見る。
+
+```python
+max_concurrency = Config.ENV_ACTOR_MAX_CONCURRENCY if all_safe else 1
+```
+
+`EnvBase.is_concurrency_safe()` の既定は `False`。contrib の 16 モジュールのうち宣言しているのは
+`GlobalInformationEnv` と `MobilitySpace` の 2 つだけなので、**それ以外を 1 つでも積むと 1 に落ちる**。
+
+- 16 エージェント・4 ラウンド・各 4 ラン
+
+  | | 参加率（中央値） | 1 ラウンド |
+  | --- | --- | --- |
+  | `max_concurrency=1` | 48% | 305 秒 |
+  | `max_concurrency=8` | **81%** | **160 秒** |
 
 - 1 では後半のラウンドで**提出がゼロ**になる。60 秒のリクエストタイムアウトを
   直列の待ち行列の後ろで使い切るため
-- 採取合計はプールを超えない ➜ `_exec_lock_ctx()` が別に守っている
-- ➜ 実行ロックと actor 並列度は**別の機構**。同じフラグで切り替えるのが設計上の混同
+- 35B・128 エージェント・`SocialMediaSpace`・宣言あり 2 本 / なし 2 本
+
+  | | 同時リクエスト中央値 | 生成スループット中央値 |
+  | --- | --- | --- |
+  | 宣言あり | **17〜19** | **1322 tok/s** |
+  | 宣言なし | 1〜2 | 343 tok/s |
+
+  - 範囲が重ならない。クライアント側 AIMD セマフォは 180 まで開いた
+  - この条件では SM 使用率 93〜94%・消費電力 467 W。GPU は使い切れる
+- **宣言していないだけのモジュールが多い。** tool 本体に `await` を 1 つも持たないのは
+  16 個中 14 個で、宣言済みの 2 個より強い条件を満たしている。`EnvRouterActor.ask` は
+  `async def` なので Ray は単一イベントループで動かし、`await` の無い tool 本体は
+  他の tool と交互実行されない
+- 宣言は 2 つを同時に有効にする。**actor の並列度**と、`router_codegen` の
+  `_execute_lock`（`_exec_lock_ctx()` が `nullcontext()` になる）
+  - 後者は生成コードが**複数 tool をまたぐ区間**の直列化を外す。tool 1 つ 1 つが原子的でも、
+    `get` → 判断 → `submit` の間に他エージェントが割り込めるようになる
+  - ➜ 宣言する前に、そのモジュールが「エージェント自身のキーしか書かないか」を確認する
 
 **代替ルータは動く。** `ReActRouter` は `env_benchmark` 用に見えるが、16 体で完走した。
 
@@ -213,6 +243,24 @@ Task: It is now round 1. First pick a whole number between 1 and 10 ...
   （`ReActRouter` が `super().__init__()` に転送していないだけ）
 - **速くはならなかった。** コード生成の往復は消えるが、function calling の往復が入る
 - 各 2 ラン。範囲が重なるので優劣は言えない
+
+**1 回の行動に 8 万トークン。内訳は prefill が生成の 8 倍**
+
+所要時間を見積もる単位は「何体か」ではなく「1 イベントに何トークンかかるか」。
+
+- `Qwen/Qwen3.6-27B`（dense）・1 GPU・128 体・`SocialMediaSpace`・thinking 有効
+- vLLM のスループットログ 4.0 時間分を積分し、`social_media_event` の件数で割った
+
+  | | 合計 | 1 イベントあたり |
+  | --- | --- | --- |
+  | prefill | 32.9M tok | 約 **74,000** |
+  | 生成 | 4.0M tok | 約 **9,000** |
+
+- **律速は prefill。** 思考が長いことではなく、1 回の行動のために 7 万トークンの
+  プロンプトを読ませていることが効く。ReAct ループが毎回ふくらんだ文脈を送り直すため
+- ➜ 生成長だけを縛っても全体の 11% にしか効かない
+- ➜ 減らすなら prefix caching のヒット率を見る（`--enable-prefix-caching` は既定で有効）
+- n=1・完走していないランからの観測。桁は信用してよいが、係数は確定ではない
 
 **`router_codegen.py` は確率的に init を落とす**
 
