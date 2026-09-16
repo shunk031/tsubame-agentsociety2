@@ -72,7 +72,12 @@ DP_SIZE="${DP_SIZE:-${GPU_COUNT}}"
 # Ray reads os.cpu_count() otherwise, which reports the whole physical node
 # regardless of how many slots Grid Engine granted, and over-subscribes the job.
 CPU_CORES="$(detect_cpu_cores)"
-export AGENTSOCIETY_LLM_RAY_MAX_WORKERS="${AGENTSOCIETY_LLM_RAY_MAX_WORKERS:-${CPU_CORES}}"
+# Not the raw core count. Grid Engine reports no NSLOTS for a whole node, so
+# detect_cpu_cores falls through to nproc and answers with the machine's 192 --
+# more workers than there are agents, which floors the batch to one agent per
+# task. See worker_budget for what that cost when it happened.
+WORKERS="$(worker_budget "${CPU_CORES}" "${GPU_COUNT}")"
+export AGENTSOCIETY_LLM_RAY_MAX_WORKERS="${AGENTSOCIETY_LLM_RAY_MAX_WORKERS:-${WORKERS}}"
 
 # Declaring the worker budget above buys nothing on its own: the tick only
 # submits ceil(NUM_AGENTS / batch) tasks, and upstream's default batch of 256
@@ -91,7 +96,7 @@ RAY_TASKS=$(( NUM_AGENTS > 0 ? (NUM_AGENTS + BATCH_SIZE - 1) / BATCH_SIZE : 1 ))
 # there and the victim need not be ours. Three 35B jobs died this way before
 # the cause was found; the granted slot count is the bound that keeps the
 # build proportional to the slots actually scheduled.
-export MAX_JOBS="${MAX_JOBS:-${CPU_CORES}}"
+export MAX_JOBS="${MAX_JOBS:-${WORKERS}}"
 
 # ray.init is called without _temp_dir, so Ray falls back to /tmp. Grid Engine
 # gives each job a private TMPDIR on node-local storage; pointing Ray at it
@@ -109,7 +114,7 @@ MEM_LIMIT="$(cat /sys/fs/cgroup/memory.max 2>/dev/null \
 # 2^63 rounded down to a page boundary is how cgroup v1 spells "unlimited".
 [[ "${MEM_LIMIT}" == "9223372036854771712" ]] && MEM_LIMIT="unlimited"
 
-log "cpus    ${CPU_CORES} (Ray workers ${AGENTSOCIETY_LLM_RAY_MAX_WORKERS}, JIT jobs ${MAX_JOBS})"
+log "cpus    ${CPU_CORES} available, ${AGENTSOCIETY_LLM_RAY_MAX_WORKERS} Ray workers, ${MAX_JOBS} JIT jobs"
 log "memory  ${MEM_LIMIT} (cgroup limit)"
 log "batch   ${BATCH_SIZE} agents per task, ${RAY_TASKS} task(s) per tick"
 log "gpus    ${GPU_COUNT} (data parallel size ${DP_SIZE})"

@@ -368,6 +368,36 @@ detect_cpu_cores() {
     fi
 }
 
+# @description Concurrent step_agent_batch tasks worth running.
+# @description
+#   Ray's budget has to follow the GPUs, not the cores. Grid Engine only
+#   reports a slot count for the smaller resource types -- gpu_1 exports
+#   NSLOTS=8 -- and exports none at all for a whole node, where nproc then
+#   answers with the machine's 192. Handing that to Ray gives more workers than
+#   there are agents, ray_batch_size floors to one agent per task, and 128
+#   processes start, each with its own LLM client and AIMD semaphore. Measured:
+#   all four GPUs idle at 0% for forty minutes while a one-GPU run beside it
+#   held 90%.
+#
+#   Eight per GPU is the cluster's own ratio, taken from what gpu_1 grants, and
+#   that configuration is the one measured at 90% SM utilisation. It is a
+#   ratio rather than a tuned constant: nothing here knows the right number of
+#   in-flight requests for an arbitrary model, but scaling with the devices
+#   that serve them is the right shape.
+# @arg $1 int Cores available.
+# @arg $2 int GPUs available.
+# @stdout Worker count, never above the cores actually present.
+worker_budget() {
+    local cores="$1" gpus="$2" budget
+    (( cores > 0 )) || cores=1
+    # No GPU at all: this is a checkout without hardware, so the cores are the
+    # only budget there is.
+    (( gpus > 0 )) || { echo "${cores}"; return; }
+    budget=$(( gpus * 8 ))
+    (( budget < cores )) && cores="${budget}"
+    echo "${cores}"
+}
+
 # @description Agents per step_agent_batch Ray Task, sized to fill the workers.
 # @description
 #   Upstream chunks the agent list every tick and submits ceil(N / BATCH_SIZE)
