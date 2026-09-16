@@ -370,9 +370,12 @@ assert_batch_size 0 8 256
     job="${SCRIPT_DIR}/../../jobs/run_sim.sh"
     missing=0
     grep -q 'export MAX_JOBS' "${job}" || missing=1
-    # Bounded by the granted slots, not by nproc: a literal or an nproc call
-    # would reintroduce the bug the export exists to prevent.
-    grep -q 'MAX_JOBS="${MAX_JOBS:-${CPU_CORES}}"' "${job}" || missing=1
+    # Bounded by the worker budget, not by a literal and not by nproc. It was
+    # the granted slot count until a whole-node job showed that Grid Engine
+    # reports no slots there and nproc answers 192 -- which is the very
+    # over-subscription this export exists to prevent.
+    grep -q 'MAX_JOBS="${MAX_JOBS:-${WORKERS}}"' "${job}" || missing=1
+    grep -q 'WORKERS="$(worker_budget' "${job}" || missing=1
     if [[ "${missing}" -eq 0 ]]; then
         printf 'ok   %-34s bounded by the granted slots\n' "jit build parallelism"
         exit 0
@@ -1232,6 +1235,72 @@ assert_ready_timeout 4 3600
         exit 0
     fi
     printf 'FAIL %-34s not exported\n' "engine ready timeout"
+    exit 1
+) || failures=$((failures + 1))
+
+# What sets the useful number of step_agent_batch tasks is how many concurrent
+# LLM requests the GPUs can serve, not how many cores the node has. Those two
+# came apart the first time a job asked for a whole node: gpu_1 exports
+# NSLOTS=8 so detect_cpu_cores answered 8, but node_f exports no NSLOTS at all
+# and nproc reports the node's 192. With 192 workers and 128 agents the batch
+# floors to one agent per task, so 128 Ray processes start, each with its own
+# LLM client and its own AIMD semaphore, and the run never advances -- SM
+# utilisation sat at 0% on all four GPUs for forty minutes while the
+# single-GPU run beside it held 90%.
+(
+    job="${SCRIPT_DIR}/../../jobs/run_sim.sh"
+    missing=0
+    grep -q 'worker_budget' "${job}" || missing=1
+    # MAX_JOBS has to follow the same budget. Left on the raw core count it
+    # puts 192 nvcc processes on a whole node, which is the OOM this repository
+    # already fixed once for gpu_1.
+    grep -q 'MAX_JOBS="${MAX_JOBS:-${CPU_CORES}}"' "${job}" && missing=1
+    if [[ "${missing}" -eq 0 ]]; then
+        printf 'ok   %-34s run_sim.sh uses it for Ray and the JIT\n' "worker budget"
+        exit 0
+    fi
+    printf 'FAIL %-34s run_sim.sh still sizes from raw cores\n' "worker budget"
+    exit 1
+) || failures=$((failures + 1))
+
+# @description Assert the worker budget for a core count and GPU count.
+assert_worker_budget() {
+    local cores="$1" gpus="$2" expected="$3" rendered
+    rendered="$(
+        bash -c "source '${SCRIPT_DIR}/common.sh'; worker_budget '${cores}' '${gpus}'"
+    )"
+    if [[ "${rendered}" == "${expected}" ]]; then
+        printf 'ok   %-34s %s cores, %s gpu -> %s\n' "worker budget" "${cores}" "${gpus}" "${rendered}"
+    else
+        printf 'FAIL %-34s %s cores, %s gpu -> %s, expected %s\n' \
+            "worker budget" "${cores}" "${gpus}" "${rendered}" "${expected}"
+        failures=$((failures + 1))
+    fi
+}
+# gpu_1 grants 8 slots per GPU and that configuration reached 90% SM, so the
+# cluster's own ratio is the one to keep when the slot count is missing.
+assert_worker_budget 8 1 8
+assert_worker_budget 192 4 32
+# Never above what the node actually has, however many GPUs are attached.
+assert_worker_budget 8 4 8
+# A GPU-less shell (the checks themselves) must still answer something usable.
+assert_worker_budget 8 0 8
+
+# The pathology to prevent: more workers than agents floors the batch to one
+# agent per task.
+(
+    # Print the budget too: without it a missing worker_budget makes the
+    # arithmetic fall back to a single task, and this assertion passes for
+    # exactly the reason it exists to catch.
+    rendered="$(
+        bash -c "source '${SCRIPT_DIR}/common.sh'; w=\$(worker_budget 192 4); b=\$(ray_batch_size 128 \"\${w}\"); echo \"\${w} \$(( (128 + b - 1) / b ))\""
+    )"
+    budget="${rendered%% *}" tasks="${rendered##* }"
+    if [[ -n "${budget}" ]] && (( budget > 1 )) && (( tasks > 1 )) && (( tasks <= 64 )); then
+        printf 'ok   %-34s 128 agents on a whole node -> %s task(s)\n' "worker budget" "${tasks}"
+        exit 0
+    fi
+    printf 'FAIL %-34s 128 agents -> %s tasks, one process per agent\n' "worker budget" "${tasks}"
     exit 1
 ) || failures=$((failures + 1))
 
