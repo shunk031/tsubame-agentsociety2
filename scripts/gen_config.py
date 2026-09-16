@@ -29,6 +29,7 @@ Schema constraints worth knowing, all enforced by the pydantic models in
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import random
 from pathlib import Path
@@ -75,6 +76,14 @@ PERSONALITIES = [
 # prohibition into a live request. Say what to send, not what to avoid.
 #
 # Formatted with `n` (the number of *other* agents), `pool` and `max_extract`.
+# Empty for English, which is what every run recorded so far produced and what
+# the default has to stay: a default that changed silently would invalidate
+# comparisons against all of them.
+LANGUAGES = {
+    "en": "",
+    "ja": " Write it in Japanese.",
+}
+
 ENVIRONMENTS = {
     "CommonsTragedyEnv": {
         "default_agents": 4,
@@ -123,24 +132,45 @@ ENVIRONMENTS = {
     # population is the environment rather than a divisor.
     "SocialMediaSpace": {
         "default_agents": 32,
+        # The instruction templates are copied verbatim from the environment's
+        # own skill document, contrib/env/social_media/agent_skills/
+        # social-media/SKILL.md, which states the rule they encode: volatile
+        # values go in `variables`, the wording of the instruction stays fixed.
+        #
+        # That is not style. The codegen router embeds the instruction and
+        # reuses cached code above a similarity threshold, and upstream reports
+        # the mechanism removes 66.5% of LLM calls. An earlier version of this
+        # role paraphrased the calls in prose; a measured 128-agent run then
+        # scored at most 0.68 against the 0.85 threshold and hit the cache zero
+        # times, so every request regenerated its code.
+        #
+        # "<observe>" is more than a template: the router recognises the literal
+        # string and answers it from a built-in runner without calling the LLM
+        # at all. A paraphrase loses that outright.
         "role": (
             "You are one of {n} others on a social network, and it is the only "
-            "thing you do: no job, no home, no errands. On every step, before "
-            "anything else, use ask_env exactly twice, in this order. First, "
-            "send this instruction word for word: \"refresh the feed using "
-            "user_id from ctx['variables']\", with user_id set to your own id. "
-            "Read what came back. Then send this instruction word for word: "
-            "\"create a post using author_id and content from "
-            "ctx['variables']\", with author_id set to your own id and content "
-            "set to what you want to say. Write content that replies to "
-            "something you just read, naming the person you are replying to, "
-            "unless the feed came back empty — then write whatever is on your "
-            "mind. Your id is the number in your profile, copied exactly as it "
-            "appears there."
+            "thing you do: no job, no home, no errands. Your id is the number "
+            "in your profile, copied exactly as it appears there.\n\n"
+            "On every step, in this order:\n"
+            "1. ask_env(instruction=\"<observe>\", ctx={{\"id\": <your id>}})\n"
+            "2. ask_env(instruction=\"refresh_feed user_id={{user_id}} "
+            "algorithm={{algorithm}} limit={{limit}}\", variables={{\"user_id\": "
+            "<your id>, \"algorithm\": \"twitter_ranking\", \"limit\": 10}}, "
+            "ctx={{\"id\": <your id>}}, readonly=True)\n"
+            "3. Read what came back, then act once. Reply to something you just "
+            "read with\n"
+            "   ask_env(instruction=\"comment_on_post user_id={{user_id}} "
+            "post_id={{post_id}} content={{content}}\", variables={{...}}, "
+            "ctx={{\"id\": <your id>}}, readonly=False)\n"
+            "   or, when the feed came back empty or nothing deserves a reply, "
+            "write your own with\n"
+            "   ask_env(instruction=\"create_post author_id={{user_id}} "
+            "content={{content}} tags={{tags}}\", variables={{...}}, "
+            "ctx={{\"id\": <your id>}}, readonly=False)\n\n"
+            "Send each instruction exactly as written, the same every step. "
+            "Your values go in variables, never into the instruction text."
+            "{language}"
         ),
-        # The environment reads feed_source and polarization_mode from kwargs;
-        # the defaults ("global", "none") are the neutral setting, so a first
-        # study measures interaction rather than an imposed structure.
         "env_kwargs": lambda n, args: {},
         "question": (
             "How many posts have you written so far? Answer with the number "
@@ -285,6 +315,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", type=Path, required=True,
                         help="Directory to write init_config.json and steps.yaml into")
+    parser.add_argument(
+        "--language",
+        default=os.environ.get("AGENT_LANGUAGE", "en"),
+        choices=sorted(LANGUAGES),
+        help="Language the agents write their content in.",
+    )
     parser.add_argument("--env-module", default="CommonsTragedyEnv",
                         choices=sorted(ENVIRONMENTS))
     parser.add_argument("--num-agents", type=int, default=0,
@@ -309,10 +345,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def build_role(spec: dict, num_agents: int, args) -> str:
     """Render the standing orders written into every agent's personality."""
+    # The requirement lands on the content and nowhere else. The two ask_env
+    # sentences have to stay byte-identical between steps or the codegen
+    # template cache can never match them, and the argument names are keys the
+    # environment looks up -- translating either would break the call rather
+    # than the prose.
+    language = LANGUAGES[getattr(args, "language", "en")]
     return spec["role"].format(
         n=num_agents - 1,
         pool=args.pool_resources,
         max_extract=args.max_extraction,
+        language=language,
     )
 
 

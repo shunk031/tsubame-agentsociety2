@@ -1304,6 +1304,36 @@ assert_worker_budget 8 0 8
     exit 1
 ) || failures=$((failures + 1))
 
+# A language that reaches gen_config's env-var default but never the CLI would
+# still work, and would stop working the moment anything changed how the job is
+# launched. This one is pinned at the call site.
+#
+# Settings go inert cheaply here. Four values in scripts/lib/common.sh did so
+# in a single day -- each computed, each looking configured, none able to have
+# the effect intended:
+#
+#   - MAX_JOBS, sized from detect_cpu_cores, which falls through to nproc on a
+#     whole node and answered 192 instead of the granted slots.
+#   - TRTLLM_DG_CACHE_DIR, built from RUN_DIR, which the job scripts define
+#     after sourcing this library, so it silently took the fallback every time.
+#   - VLLM_ENGINE_READY_TIMEOUT_S, computed from DP_SIZE at source time for the
+#     same reason, so four GPUs always received the one-GPU budget.
+#   - GENERATION_MAX_TOKENS, emitted inside the Qwen3.[5-9] branch, which would
+#     have made it a silent no-op for any other model family.
+#
+# Only the fourth was caught before it shipped, and only because an assertion
+# drove build_vllm_args rather than presetting the variable. The other three
+# ran on hardware first.
+(
+    job="${SCRIPT_DIR}/../../jobs/run_sim.sh"
+    if grep -q -- '--language' "${job}"; then
+        printf 'ok   %-34s passed to gen_config\n' "agent language"
+        exit 0
+    fi
+    printf 'FAIL %-34s never reaches gen_config\n' "agent language"
+    exit 1
+) || failures=$((failures + 1))
+
 # Every ad-hoc monitor written during a long session omitted something, and
 # the omissions cost more than the runs did: a job reported as "still starting"
 # an hour after it was submitted, two hours spent polling one that had already
