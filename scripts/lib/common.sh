@@ -367,6 +367,19 @@ else
 fi
 export AGENTSOCIETY_LLM_RAY_CONCURRENCY
 
+# Upstream caps an LLM request at 60 s, which reads a waiting request as a
+# request in trouble. Saturating a backend we own inverts that: the queue is
+# the point. At 100+ concurrent requests on one card each reply is drawn at a
+# fraction of the solo rate, so an ordinary reply plus its turn in the queue
+# passes 60 s as a matter of course -- job 8692507 logged 285 timeouts in five
+# minutes and fell from 82% power to 44% as the retries piled onto the load
+# that caused them.
+#
+# The cap is still here to catch a genuinely hung request. Real failures are
+# the retry loop's job, so a generous value costs slower detection, not a run
+# that never ends.
+export AGENTSOCIETY_LLM_REQUEST_TIMEOUT="${AGENTSOCIETY_LLM_REQUEST_TIMEOUT:-900}"
+
 # One round is a run step followed by a questionnaire. The questionnaire is
 # where the data comes from; a run on its own records almost nothing. There is
 # no ask or intervene step — see the docstring on gen_config.build_steps.
