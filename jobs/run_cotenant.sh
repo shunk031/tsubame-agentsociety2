@@ -61,6 +61,22 @@ GPU_COUNT="$(detect_gpu_count)"
 DP_SIZE="${DP_SIZE:-${GPU_COUNT}}"
 log "gpus    ${GPU_COUNT}"
 
+CPU_CORES="$(detect_cpu_cores)"
+# Two populations share this node's cores, so each Ray cluster gets half the
+# budget a single population would take. Handing both the whole node would have
+# them oversubscribe it against each other, which is a different experiment than
+# the one this job runs.
+WORKERS="$(worker_budget "${CPU_CORES}" "${GPU_COUNT}")"
+WORKERS=$(( WORKERS / 2 )); (( WORKERS > 0 )) || WORKERS=1
+export AGENTSOCIETY_LLM_RAY_MAX_WORKERS="${AGENTSOCIETY_LLM_RAY_MAX_WORKERS:-${WORKERS}}"
+
+# Derived, not inherited: ceil(NUM_AGENTS / BATCH_SIZE) has to reach the worker
+# count or the extra workers sit idle. See ray_batch_size.
+BATCH_SIZE="${BATCH_SIZE:-$(ray_batch_size "${NUM_AGENTS}" "${AGENTSOCIETY_LLM_RAY_MAX_WORKERS}")}"
+export MAX_JOBS="${MAX_JOBS:-${WORKERS}}"
+log "cpus    ${CPU_CORES} available, ${AGENTSOCIETY_LLM_RAY_MAX_WORKERS} Ray workers per population"
+log "batch   ${BATCH_SIZE} agents per task"
+
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 
 start_gpu_sampler "${RUN_DIR}/gpu.csv"

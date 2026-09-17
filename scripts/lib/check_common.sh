@@ -1150,6 +1150,39 @@ assert_provenance() {
 
 # A guard nothing calls is a guard that does not exist, and both jobs run out of
 # the environment this check describes.
+# A job that passes --flag "${VAR}" has to get VAR from somewhere. Copying an
+# invocation out of another job without the lines that derive its arguments
+# leaves a reference with no definition, and `set -u` turns that into a failure
+# at the moment the value is used -- which, for a backgrounded population, is
+# long after the job looked like it had started. jobs/run_cotenant.sh shipped
+# exactly that: it carried --batch-size "${BATCH_SIZE}" without the two lines
+# that compute BATCH_SIZE, and both populations died silently at launch while
+# the job waited ten minutes to notice.
+for job in "${SCRIPT_DIR}/../../jobs"/*.sh; do
+    [[ -f "${job}" ]] || continue
+    name="$(basename "${job}")"
+    undefined=""
+    # Variables handed to a flag, which is where a copied invocation shows up.
+    while read -r var; do
+        [[ -n "${var}" ]] || continue
+        # Defined by the job itself, or exported by common.sh, or a documented
+        # environment input the submitter supplies.
+        grep -qE "(^|[[:space:]])(export[[:space:]]+)?${var}=" "${job}" && continue
+        grep -qE "(^|[[:space:]])(export[[:space:]]+)?${var}=" "${SCRIPT_DIR}/common.sh" && continue
+        undefined="${undefined} ${var}"
+    # Only a reference with no default: "${VAR:-x}" survives `set -u` on its
+    # own and is a deliberate optional input, not a missing derivation.
+    done < <(grep -oE '\-\-[a-z-]+ "\$\{[A-Z_]+\}"' "${job}" \
+             | grep -oE '[A-Z_]{2,}' | sort -u)
+    if [[ -z "${undefined}" ]]; then
+        printf 'ok   %-34s %s\n' "job flag arguments defined" "${name}"
+    else
+        printf 'FAIL %-34s %s uses%s with no definition\n' \
+            "job flag arguments defined" "${name}" "${undefined}"
+        failures=$((failures + 1))
+    fi
+done
+
 for job in run_sim run_cotenant smoke; do
     if grep -q 'assert_env_matches_source' "${SCRIPT_DIR}/../../jobs/${job}.sh"; then
         printf 'ok   %-34s jobs/%s.sh checks its environment\n' "provenance job" "${job}"
