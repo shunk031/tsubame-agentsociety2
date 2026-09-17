@@ -34,8 +34,12 @@ TSUBAME 4.0 / H100 / Qwen3.6-27B / AgentSociety 2.8.7 / SocialMediaSpace。
   - ➜ 10B 以上を 100 体ぶん、同時に回せる環境が要る
 
 - TSUBAME 4.0 が使える ➜ H100 を多数確保できる
-  - シナリオは `SocialMediaSpace`
-    - 11 ツール中 9 つが他エージェントの id を取る = 相互作用が発生する設計
+  - シナリオは [`SocialMediaSpace`](https://github.com/tsinghua-fib-lab/agentsociety/tree/main/packages/agentsociety2/agentsociety2/contrib/env/social_media)
+    - agentsociety2 に同梱の環境モジュール。SNS を模した場を提供する
+    - エージェントは投稿・返信・いいね・フォロー・検索でやり取りする
+      （`create_post` / `comment_on_post` / `like_post` / `follow_user` / `refresh_feed` ほか）
+    - 選定理由: ツールの多くが他エージェントの id を取る = 相互作用が発生する設計
+      - contrib の 16 env のうち 10 は、他エージェントを指すツールを持たない
 
 - 確保できることと使い切れることは別。本調査はそこを測る
   - 実測: 4 GPU に 128 体では `Waiting: 0` = 供給不足
