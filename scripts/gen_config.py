@@ -144,6 +144,21 @@ ENVIRONMENTS = {
         # scored at most 0.68 against the 0.85 threshold and hit the cache zero
         # times, so every request regenerated its code.
         #
+        # The variable keys are spelled out rather than left as an ellipsis.
+        # The cache compares an incoming key set against a candidate's with
+        # issubset in both directions, so {user_id, content} and
+        # {author_id, content, tags} are incompatible and the lookup rejects the
+        # entry however similar the instructions are. Left to invent their own
+        # keys, agents produced 53 such rejections in one run.
+        #
+        # template_mode=True is what switches the cache on at all. ask_env
+        # defaults it to False and CacheCodeProvider.on_final only records an
+        # entry when it is true, so with the default nothing is ever written
+        # and every lookup misses however stable the instruction is. A run that
+        # sent these exact templates eighty-four times recorded zero hits until
+        # this was added. It is omitted on the observe call, which the router
+        # answers from a built-in runner and never caches.
+        #
         # "<observe>" is more than a template: the router recognises the literal
         # string and answers it from a built-in runner without calling the LLM
         # at all. A paraphrase loses that outright.
@@ -156,17 +171,21 @@ ENVIRONMENTS = {
             "2. ask_env(instruction=\"refresh_feed user_id={{user_id}} "
             "algorithm={{algorithm}} limit={{limit}}\", variables={{\"user_id\": "
             "<your id>, \"algorithm\": \"twitter_ranking\", \"limit\": 10}}, "
-            "ctx={{\"id\": <your id>}}, readonly=True)\n"
+            "ctx={{\"id\": <your id>}}, readonly=True, template_mode=True)\n"
             "3. Read what came back, then act once. Reply to something you just "
             "read with\n"
             "   ask_env(instruction=\"comment_on_post user_id={{user_id}} "
-            "post_id={{post_id}} content={{content}}\", variables={{...}}, "
-            "ctx={{\"id\": <your id>}}, readonly=False)\n"
+            "post_id={{post_id}} content={{content}}\", variables={{\"user_id\": "
+            "<your id>, \"post_id\": <the post you are replying to>, "
+            "\"content\": <what you want to say>}}, "
+            "ctx={{\"id\": <your id>}}, readonly=False, template_mode=True)\n"
             "   or, when the feed came back empty or nothing deserves a reply, "
             "write your own with\n"
             "   ask_env(instruction=\"create_post author_id={{user_id}} "
-            "content={{content}} tags={{tags}}\", variables={{...}}, "
-            "ctx={{\"id\": <your id>}}, readonly=False)\n\n"
+            "content={{content}} tags={{tags}}\", variables={{\"user_id\": "
+            "<your id>, \"content\": <what you want to say>, "
+            "\"tags\": <a list of topic words>}}, "
+            "ctx={{\"id\": <your id>}}, readonly=False, template_mode=True)\n\n"
             "Send each instruction exactly as written, the same every step. "
             "Your values go in variables, never into the instruction text."
             "{language}"
