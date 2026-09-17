@@ -447,6 +447,31 @@ fi
 
 # --- Environment detection --------------------------------------------------
 
+# @description Count the nodes Grid Engine gave this job.
+# @stdout Node count; 1 when there is no hostfile.
+# @description
+#   $PE_HOSTFILE lists one line per granted slot as "host slots queue procs", so
+#   a node with many slots appears many times. The count that matters is of
+#   distinct hosts. Absent the file the job holds one node, which is what every
+#   single-node submission looks like.
+detect_node_count() {
+    if [[ -n "${PE_HOSTFILE:-}" ]] && [[ -r "${PE_HOSTFILE}" ]]; then
+        awk '{print $1}' "${PE_HOSTFILE}" | sort -u | grep -c . || echo 1
+    else
+        echo 1
+    fi
+}
+
+# @description List the nodes Grid Engine gave this job, head first.
+# @stdout One hostname per line; this host alone when there is no hostfile.
+detect_nodes() {
+    if [[ -n "${PE_HOSTFILE:-}" ]] && [[ -r "${PE_HOSTFILE}" ]]; then
+        awk '!seen[$1]++ {print $1}' "${PE_HOSTFILE}"
+    else
+        hostname
+    fi
+}
+
 # @description Count the GPUs visible to this process.
 # @stdout GPU count, or 0 when nvidia-smi is unavailable.
 detect_gpu_count() {
@@ -952,6 +977,31 @@ build_vllm_args() {
         *) die "PARALLELISM must be tensor or data, not ${PARALLELISM}" ;;
     esac
 
+    # One deployment spread over several nodes still exposes a single endpoint:
+    # the head serves HTTP and every other node joins it headless over RPC, so
+    # nothing above this layer -- the simulator, its litellm Router -- learns
+    # that there is more than one machine. --data-parallel-size is the total
+    # across nodes; --data-parallel-size-local is this node's share.
+    VLLM_NODE_ROLE="${VLLM_NODE_ROLE:-single}"
+    VLLM_DP_RPC_PORT="${VLLM_DP_RPC_PORT:-13345}"
+    if [[ "${VLLM_NODE_ROLE}" != "single" ]]; then
+        [[ -n "${VLLM_HEAD_ADDRESS:-}" ]] || die "VLLM_HEAD_ADDRESS is required for a multi-node vLLM"
+        [[ -n "${VLLM_DP_SIZE_TOTAL:-}" ]] || die "VLLM_DP_SIZE_TOTAL is required for a multi-node vLLM"
+        VLLM_ARGS=(serve "${MODEL}")
+        # Only the head binds HTTP. A headless worker that also bound the port
+        # would take it on its own node and answer requests nobody routes there.
+        if [[ "${VLLM_NODE_ROLE}" == "head" ]]; then
+            VLLM_ARGS+=(--host "${VLLM_HOST}" --port "${VLLM_PORT}")
+        else
+            VLLM_ARGS+=(--headless)
+        fi
+        VLLM_ARGS+=(
+            --data-parallel-size "${VLLM_DP_SIZE_TOTAL}"
+            --data-parallel-size-local "${dp_size}"
+            --data-parallel-address "${VLLM_HEAD_ADDRESS}"
+            --data-parallel-rpc-port "${VLLM_DP_RPC_PORT}"
+        )
+    else
     VLLM_ARGS=(
         serve "${MODEL}"
         --host "${VLLM_HOST}"
@@ -962,6 +1012,17 @@ build_vllm_args() {
         --max-num-seqs "${MAX_NUM_SEQS}"
         --enable-prefix-caching
     )
+    fi
+
+    # Shared by both shapes: limits and caching apply per rank either way.
+    if [[ "${VLLM_NODE_ROLE}" != "single" ]]; then
+        VLLM_ARGS+=(
+            --max-model-len "${MAX_MODEL_LEN}"
+            --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
+            --max-num-seqs "${MAX_NUM_SEQS}"
+            --enable-prefix-caching
+        )
+    fi
 
     # One process already needs three times the 600 s default; every extra
     # data-parallel process contends for the same weights and the same JIT
@@ -1159,6 +1220,15 @@ stop_vllm() {
         kill "${VLLM_PID}" 2>/dev/null || true
         wait "${VLLM_PID}" 2>/dev/null || true
     fi
+    # Headless ranks are other machines' processes; the job's exit does not
+    # reach them. Left behind they hold the GPUs of a node the scheduler has
+    # already handed to somebody else.
+    local node
+    for node in ${VLLM_WORKER_NODES:-}; do
+        log "stopping headless vLLM on ${node}"
+        ssh -o BatchMode=yes -o ConnectTimeout=10 "${node}" \
+            "pkill -f 'vllm serve' || true" >/dev/null 2>&1 || true
+    done
 }
 
 # @description Start vLLM in the background and block until it answers.
@@ -1171,8 +1241,38 @@ stop_vllm() {
 # @exitcode 1 Server failed to start.
 start_vllm() {
     local dp_size="$1" log_file="$2"
+    local nodes node_count head worker i
 
     assert_port_free "${VLLM_PORT}"
+
+    nodes="$(detect_nodes)"
+    node_count="$(detect_node_count)"
+    head="$(echo "${nodes}" | head -1)"
+
+    if (( node_count > 1 )); then
+        # Every rank dials the head, so its address has to be one the other
+        # nodes can reach -- the interconnect name Grid Engine handed out, not
+        # VLLM_HOST, which is the loopback the simulator uses on this machine.
+        export VLLM_HEAD_ADDRESS="${VLLM_HEAD_ADDRESS:-${head}}"
+        export VLLM_DP_SIZE_TOTAL="${VLLM_DP_SIZE_TOTAL:-$(( dp_size * node_count ))}"
+        VLLM_WORKER_NODES="$(echo "${nodes}" | tail -n +2 | tr '\n' ' ')"
+        log "multi-node vLLM: ${node_count} nodes, head ${VLLM_HEAD_ADDRESS}, ${VLLM_DP_SIZE_TOTAL} ranks"
+
+        # Workers first: the head blocks until every rank has joined, so a head
+        # started ahead of them just spends its readiness budget waiting.
+        i=0
+        for worker in ${VLLM_WORKER_NODES}; do
+            i=$(( i + 1 ))
+            log "starting headless vLLM on ${worker}"
+            VLLM_NODE_ROLE=worker build_vllm_args "${dp_size}"
+            ssh -o BatchMode=yes -o ConnectTimeout=20 "${worker}" \
+                "cd '${REPO_ROOT}' && VLLM_HEAD_ADDRESS='${VLLM_HEAD_ADDRESS}' \
+                 VLLM_DP_RPC_PORT='${VLLM_DP_RPC_PORT:-13345}' \
+                 '${VENV}/bin/vllm' ${VLLM_ARGS[*]}" \
+                >"${log_file%.log}-worker${i}.log" 2>&1 &
+        done
+        VLLM_NODE_ROLE="head"
+    fi
 
     build_vllm_args "${dp_size}"
     log "starting vLLM on ${VLLM_HOST}:${VLLM_PORT}, logging to ${log_file}"
