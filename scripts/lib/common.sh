@@ -401,6 +401,18 @@ die() {
     exit 1
 }
 
+# Refuse an over-subscribed pair here, not after the generation server has spent
+# ten minutes loading weights. vLLM reserves its fraction on startup, so the
+# embedding server is the one that fails, and it fails as "Engine core
+# initialization failed" -- a message that points at the embedding model and
+# not at the budget that left it no memory. Job 8692239 died exactly that way
+# on GPU_MEMORY_UTILIZATION=0.95, which asks for 1.01 of the card alongside the
+# embedding server's 0.06.
+if ! awk -v g="${GPU_MEMORY_UTILIZATION}" -v e="${EMBEDDING_GPU_MEMORY_UTILIZATION}" \
+        'BEGIN{exit !(g + e < 1.0)}'; then
+    die "GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION} plus EMBEDDING_GPU_MEMORY_UTILIZATION=${EMBEDDING_GPU_MEMORY_UTILIZATION} reserves the whole card; the embedding server would fail to start"
+fi
+
 # --- Environment detection --------------------------------------------------
 
 # @description Count the GPUs visible to this process.

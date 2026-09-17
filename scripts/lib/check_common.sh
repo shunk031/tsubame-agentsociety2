@@ -1473,6 +1473,63 @@ assert_llm_initial 32 32
 assert_llm_initial 4 16
 assert_llm_initial 0 16
 
+# Both vLLM servers share one card, so their two reservations are one budget.
+# GPU_MEMORY_UTILIZATION=0.95 alongside the embedding server's 0.06 asks for
+# 1.01 of the card: the generation server starts, takes its share, and the
+# embedding server dies with "Engine core initialization failed" -- which reads
+# like an embedding problem and is not one. The job then tears down a node it
+# just spent ten minutes loading weights onto.
+(
+    read -r gen emb <<<"$(bash -c \
+        "source '${SCRIPT_DIR}/common.sh'; printf '%s %s' \
+         \"\${GPU_MEMORY_UTILIZATION}\" \"\${EMBEDDING_GPU_MEMORY_UTILIZATION}\"")"
+    if awk -v g="${gen}" -v e="${emb}" 'BEGIN{exit !(g+e < 1.0)}'; then
+        printf 'ok   %-34s %s + %s < 1.0\n' "gpu memory budget" "${gen}" "${emb}"
+        exit 0
+    fi
+    printf 'FAIL %-34s %s + %s >= 1.0, embedding server cannot start\n' \
+        "gpu memory budget" "${gen}" "${emb}"
+    exit 1
+) || failures=$((failures + 1))
+
+# @description Assert the combined budget rejects an over-subscribed override.
+# @arg $1 string Value of GPU_MEMORY_UTILIZATION.
+# @arg $2 string Whether the pair should fit (fit/over).
+assert_gpu_budget() {
+    local gen="$1" want="$2" got
+    if GPU_MEMORY_UTILIZATION="${gen}" bash -c \
+        "source '${SCRIPT_DIR}/common.sh'; awk -v g=\"\${GPU_MEMORY_UTILIZATION}\" \
+         -v e=\"\${EMBEDDING_GPU_MEMORY_UTILIZATION}\" 'BEGIN{exit !(g+e < 1.0)}'"; then
+        got=fit
+    else
+        got=over
+    fi
+    if [[ "${got}" == "${want}" ]]; then
+        printf 'ok   %-34s %s -> %s\n' "gpu memory budget" "${gen}" "${got}"
+    else
+        printf 'FAIL %-34s %s -> %s, expected %s\n' "gpu memory budget" "${gen}" "${got}" "${want}"
+        failures=$((failures + 1))
+    fi
+}
+# 0.95 is the value that killed job 8692239 on a node_h allocation.
+assert_gpu_budget 0.95 over
+assert_gpu_budget 0.90 fit
+
+# Detecting the over-subscription is not the same as refusing it. Sourcing
+# common.sh with an over-subscribed pair has to fail there and then, while the
+# job has spent nothing, rather than ten minutes later when the embedding
+# server cannot find memory the generation server already took.
+(
+    if GPU_MEMORY_UTILIZATION=0.95 bash -c \
+        "source '${SCRIPT_DIR}/common.sh'" >/dev/null 2>&1; then
+        printf 'FAIL %-34s 0.95 was accepted, job would die after weight load\n' \
+            "gpu memory budget refused"
+        exit 1
+    fi
+    printf 'ok   %-34s 0.95 refused at source time\n' "gpu memory budget refused"
+    exit 0
+) || failures=$((failures + 1))
+
 # A language that reaches gen_config's env-var default but never the CLI would
 # still work, and would stop working the moment anything changed how the job is
 # launched. This one is pinned at the call site.
