@@ -1495,6 +1495,38 @@ assert_llm_initial 32 32
 assert_llm_initial 4 16
 assert_llm_initial 0 16
 
+# Upstream's LLM request timeout is 60 s, which assumes a request that waits is
+# a request in trouble. Saturating a backend we own inverts that: a queue is the
+# point, and vLLM reports `Waiting: 13-42` in the configuration that finally
+# reached the power target. At 100+ concurrent requests on one card each reply
+# is drawn at a fraction of the solo rate, so a normal reply plus its turn in
+# the queue passes 60 s routinely -- job 8692507 logged 285 `litellm.Timeout` in
+# five minutes and fell from 82% power to 44% as the retries piled on.
+#
+# The cap still exists to catch a genuinely hung request; the dispatcher's own
+# bounded retry loop is what handles real failures, so the cost of a generous
+# value is slower detection, not a stuck run.
+(
+    rendered="$(bash -c \
+        "source '${SCRIPT_DIR}/common.sh'; printf '%s' \"\${AGENTSOCIETY_LLM_REQUEST_TIMEOUT}\"")"
+    if [[ -n "${rendered}" ]] && (( rendered >= 600 )); then
+        printf 'ok   %-34s %ss\n' "llm request timeout" "${rendered}"
+        exit 0
+    fi
+    printf 'FAIL %-34s "%s", need >= 600\n' "llm request timeout" "${rendered}"
+    exit 1
+) || failures=$((failures + 1))
+
+(
+    # Exported, or the Ray worker reads upstream's 60 s at import time.
+    if grep -q 'export AGENTSOCIETY_LLM_REQUEST_TIMEOUT' "${SCRIPT_DIR}/common.sh"; then
+        printf 'ok   %-34s exported\n' "llm request timeout"
+        exit 0
+    fi
+    printf 'FAIL %-34s not exported\n' "llm request timeout"
+    exit 1
+) || failures=$((failures + 1))
+
 # Both vLLM servers share one card, so their two reservations are one budget.
 # GPU_MEMORY_UTILIZATION=0.95 alongside the embedding server's 0.06 asks for
 # 1.01 of the card: the generation server starts, takes its share, and the
