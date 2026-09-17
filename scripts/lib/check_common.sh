@@ -1709,7 +1709,7 @@ assert_multinode_flag() {
     local role="$1" want="$2" rendered
     rendered="$(
         VLLM_HEAD_ADDRESS=10.0.0.1 VLLM_DP_RPC_PORT=13345 \
-        VLLM_NODE_ROLE="${role}" VLLM_DP_SIZE_TOTAL=8 \
+        VLLM_NODE_ROLE="${role}" VLLM_DP_SIZE_TOTAL=8 VLLM_DP_START_RANK=4 \
             bash -c "source '${SCRIPT_DIR}/common.sh'; build_vllm_args 4; printf '%s' \"\${VLLM_ARGS[*]}\""
     )"
     if [[ "${rendered}" == *"${want}"* ]]; then
@@ -1725,11 +1725,29 @@ assert_multinode_flag head "--data-parallel-address 10.0.0.1"
 assert_multinode_flag head "--data-parallel-rpc-port 13345"
 assert_multinode_flag worker "--headless"
 assert_multinode_flag worker "--data-parallel-address 10.0.0.1"
+# Without a start rank a headless node numbers its engines from 0 and collides
+# with the head's. The coordinator then waits forever for ranks that never
+# register, the head sits on "Waiting for READY message from DP Coordinator",
+# and the worker gives up after its five-minute front-end timeout.
+(
+    rendered="$(
+        VLLM_HEAD_ADDRESS=10.0.0.1 VLLM_NODE_ROLE=worker VLLM_DP_SIZE_TOTAL=8 \
+        VLLM_DP_START_RANK=4 \
+            bash -c "source '${SCRIPT_DIR}/common.sh'; build_vllm_args 4; printf '%s' \"\${VLLM_ARGS[*]}\""
+    )"
+    if [[ "${rendered}" == *"--data-parallel-start-rank 4"* ]]; then
+        printf 'ok   %-34s worker carries its start rank\n' "multi-node vllm"
+        exit 0
+    fi
+    printf 'FAIL %-34s worker has no --data-parallel-start-rank\n' "multi-node vllm"
+    exit 1
+) || failures=$((failures + 1))
 
 (
     # The head serves HTTP; a headless worker must not also bind that port.
     rendered="$(
         VLLM_HEAD_ADDRESS=10.0.0.1 VLLM_NODE_ROLE=worker VLLM_DP_SIZE_TOTAL=8 \
+        VLLM_DP_START_RANK=4 \
             bash -c "source '${SCRIPT_DIR}/common.sh'; build_vllm_args 4; printf '%s' \"\${VLLM_ARGS[*]}\""
     )"
     if [[ "${rendered}" != *"--port"* ]]; then
