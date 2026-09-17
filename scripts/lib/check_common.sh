@@ -1150,7 +1150,7 @@ assert_provenance() {
 
 # A guard nothing calls is a guard that does not exist, and both jobs run out of
 # the environment this check describes.
-for job in run_sim smoke; do
+for job in run_sim run_cotenant smoke; do
     if grep -q 'assert_env_matches_source' "${SCRIPT_DIR}/../../jobs/${job}.sh"; then
         printf 'ok   %-34s jobs/%s.sh checks its environment\n' "provenance job" "${job}"
     else
