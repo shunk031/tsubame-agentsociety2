@@ -1662,6 +1662,102 @@ assert_gpu_budget 0.90 fit
     exit 1
 ) || failures=$((failures + 1))
 
+# --- multi-node vLLM --------------------------------------------------------
+
+# Grid Engine names the nodes it gave a job in $PE_HOSTFILE, one line per slot
+# with the host first. vLLM's multi-node data parallel needs that list twice
+# over: the head node's address, which every rank dials, and the node count,
+# which sets --data-parallel-size. Misreading it is silent -- a job that thinks
+# it holds one node simply runs on a fraction of the hardware it was given.
+# @description Assert the node count read from a PE_HOSTFILE.
+# @arg $1 string File contents, or "" to leave PE_HOSTFILE unset.
+# @arg $2 string Expected node count.
+assert_node_count() {
+    local content="$1" expected="$2" rendered tmp
+    if [[ -n "${content}" ]]; then
+        tmp="$(mktemp)"; printf '%s\n' "${content}" >"${tmp}"
+        rendered="$(PE_HOSTFILE="${tmp}" bash -c \
+            "source '${SCRIPT_DIR}/common.sh'; detect_node_count")"
+        rm -f "${tmp}"
+    else
+        rendered="$(bash -c "source '${SCRIPT_DIR}/common.sh'; detect_node_count")"
+    fi
+    if [[ "${rendered}" == "${expected}" ]]; then
+        printf 'ok   %-34s %s\n' "node count" "${rendered}"
+    else
+        printf 'FAIL %-34s got "%s", expected %s\n' "node count" "${rendered}" "${expected}"
+        failures=$((failures + 1))
+    fi
+}
+# No hostfile means a single-node job, which is every job this repo ran before.
+assert_node_count "" 1
+assert_node_count "r1n1 48 all.q@r1n1 UNDEFINED" 1
+assert_node_count "r1n1 48 all.q@r1n1 UNDEFINED
+r2n2 48 all.q@r2n2 UNDEFINED" 2
+# A host repeats once per slot granted on it; the count is of hosts, not lines.
+assert_node_count "r1n1 24 all.q@r1n1 UNDEFINED
+r1n1 24 all.q@r1n1 UNDEFINED
+r2n2 48 all.q@r2n2 UNDEFINED" 2
+
+# The head node serves the one HTTP endpoint; every other node joins it headless
+# over RPC. Both halves name the same address and port, and each names the GPUs
+# on its own node rather than the total.
+# @description Assert a flag appears in the argv a role would be started with.
+# @arg $1 string Role: head or worker.
+# @arg $2 string Substring that must appear.
+assert_multinode_flag() {
+    local role="$1" want="$2" rendered
+    rendered="$(
+        VLLM_HEAD_ADDRESS=10.0.0.1 VLLM_DP_RPC_PORT=13345 \
+        VLLM_NODE_ROLE="${role}" VLLM_DP_SIZE_TOTAL=8 VLLM_DP_START_RANK=4 \
+            bash -c "source '${SCRIPT_DIR}/common.sh'; build_vllm_args 4; printf '%s' \"\${VLLM_ARGS[*]}\""
+    )"
+    if [[ "${rendered}" == *"${want}"* ]]; then
+        printf 'ok   %-34s %s carries %s\n' "multi-node vllm" "${role}" "${want}"
+    else
+        printf 'FAIL %-34s %s missing %s\n' "multi-node vllm" "${role}" "${want}"
+        failures=$((failures + 1))
+    fi
+}
+assert_multinode_flag head "--data-parallel-size 8"
+assert_multinode_flag head "--data-parallel-size-local 4"
+assert_multinode_flag head "--data-parallel-address 10.0.0.1"
+assert_multinode_flag head "--data-parallel-rpc-port 13345"
+assert_multinode_flag worker "--headless"
+assert_multinode_flag worker "--data-parallel-address 10.0.0.1"
+# Without a start rank a headless node numbers its engines from 0 and collides
+# with the head's. The coordinator then waits forever for ranks that never
+# register, the head sits on "Waiting for READY message from DP Coordinator",
+# and the worker gives up after its five-minute front-end timeout.
+(
+    rendered="$(
+        VLLM_HEAD_ADDRESS=10.0.0.1 VLLM_NODE_ROLE=worker VLLM_DP_SIZE_TOTAL=8 \
+        VLLM_DP_START_RANK=4 \
+            bash -c "source '${SCRIPT_DIR}/common.sh'; build_vllm_args 4; printf '%s' \"\${VLLM_ARGS[*]}\""
+    )"
+    if [[ "${rendered}" == *"--data-parallel-start-rank 4"* ]]; then
+        printf 'ok   %-34s worker carries its start rank\n' "multi-node vllm"
+        exit 0
+    fi
+    printf 'FAIL %-34s worker has no --data-parallel-start-rank\n' "multi-node vllm"
+    exit 1
+) || failures=$((failures + 1))
+
+(
+    # The head serves HTTP; a headless worker must not also bind that port.
+    rendered="$(
+        VLLM_HEAD_ADDRESS=10.0.0.1 VLLM_NODE_ROLE=worker VLLM_DP_SIZE_TOTAL=8 \
+        VLLM_DP_START_RANK=4 \
+            bash -c "source '${SCRIPT_DIR}/common.sh'; build_vllm_args 4; printf '%s' \"\${VLLM_ARGS[*]}\""
+    )"
+    if [[ "${rendered}" != *"--port"* ]]; then
+        printf 'ok   %-34s worker binds no port\n' "multi-node vllm"
+        exit 0
+    fi
+    printf 'FAIL %-34s worker still binds a port\n' "multi-node vllm"
+    exit 1
+) || failures=$((failures + 1))
+
 if [[ "${failures}" -gt 0 ]]; then
     printf '\n%d check(s) failed\n' "${failures}"
     exit 1
