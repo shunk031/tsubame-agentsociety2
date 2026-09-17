@@ -239,6 +239,25 @@ stop_gpu_sampler() {
 # relies on the same guarantee. RUN_DIR would be wrong here -- the job scripts
 # define it after sourcing this file, so it is still unset at this point.
 export VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER="${VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER:-0}"
+
+# The block-scale switch above does not close the cache: DeepGEMM reaches it by
+# a different route. A BF16 dense model with that switch already off still
+# logged "DeepGEMM E8M0 enabled on current platform" and still compiled gemm
+# shapes into the directory below.
+#
+# Per job is not enough isolation for it either. A data-parallel server runs
+# several ranks inside one job, they compile the same shape at the same moment,
+# one finishes and removes its tmp directory, and the others' rename fails with
+# ENOENT -- the same assertion as above, from a collision entirely within the
+# job. Per-process isolation is not reachable from here: the directory is read
+# once with getenv in the vendored TensorRT-LLM C++, and vLLM offers its
+# data-parallel children no per-rank override.
+#
+# Off for every configuration, not only multi-GPU. Leaving it on at one GPU --
+# where the race cannot occur -- would change which kernels run between the two
+# arms of a one-GPU-versus-four-GPU comparison, which is the measurement this
+# setup exists to serve.
+export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
 export TRTLLM_DG_CACHE_DIR="${TRTLLM_DG_CACHE_DIR:-${TMPDIR:-/tmp}/trtllm-cache-${JOB_ID:-local}}"
 
 # --- Embedding --------------------------------------------------------------

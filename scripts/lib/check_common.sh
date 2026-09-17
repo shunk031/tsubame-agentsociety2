@@ -390,16 +390,22 @@ assert_batch_size 0 8 256
 # tmp/ and renames it into cache/. Four jobs that start together compile the
 # same shape into the same shared directory and three of them lose the rename
 # to ENOENT, which surfaces as "Assertion failed: !cubin.empty()" and a vLLM
-# that never starts. Both halves are asserted: the path is switched off, and
-# the cache is per-job so nothing else on that path can collide either.
+# that never starts. All three guards are asserted: the block-scale path is
+# switched off, DeepGEMM -- which reaches the same cache by a different route,
+# from a BF16 dense model too -- is switched off with it, and the cache is
+# per-job so nothing else on that path can collide either.
 (
     rendered="$(
         JOB_ID=4242 TMPDIR=/tmp/check-jobtmp \
-            bash -c "source '${SCRIPT_DIR}/common.sh'; printf '%s|%s' \"\${VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER}\" \"\${TRTLLM_DG_CACHE_DIR}\""
+            bash -c "source '${SCRIPT_DIR}/common.sh'; printf '%s|%s|%s' \"\${VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER}\" \"\${VLLM_USE_DEEP_GEMM}\" \"\${TRTLLM_DG_CACHE_DIR}\""
     )"
-    flag="${rendered%%|*}" cache="${rendered##*|}"
+    flag="${rendered%%|*}" rest="${rendered#*|}"
+    deep_gemm="${rest%%|*}" cache="${rest#*|}"
     missing=0
     [[ "${flag}" == "0" ]] || missing=1
+    # Per job is not isolation enough for DeepGEMM: the ranks of one
+    # data-parallel server race each other inside a single job's directory.
+    [[ "${deep_gemm}" == "0" ]] || missing=1
     # Per job, not merely somewhere writable: a constant path outside home
     # would still be shared by every job on the cluster. It must also land on
     # the job's own TMPDIR, so the artefacts go to node-local scratch and are
@@ -407,10 +413,10 @@ assert_batch_size 0 8 256
     [[ "${cache}" == *4242* ]] || missing=1
     [[ "${cache}" == /tmp/check-jobtmp/* ]] || missing=1
     if [[ "${missing}" -eq 0 ]]; then
-        printf 'ok   %-34s off, cache at %s\n' "trtllm gemm jit" "${cache}"
+        printf 'ok   %-34s both off, cache at %s\n' "trtllm gemm jit" "${cache}"
         exit 0
     fi
-    printf 'FAIL %-34s flag=%s cache=%s\n' "trtllm gemm jit" "${flag}" "${cache}"
+    printf 'FAIL %-34s flag=%s deep_gemm=%s cache=%s\n' "trtllm gemm jit" "${flag}" "${deep_gemm}" "${cache}"
     exit 1
 ) || failures=$((failures + 1))
 
@@ -420,13 +426,29 @@ assert_batch_size 0 8 256
     lib="${SCRIPT_DIR}/common.sh"
     missing=0
     grep -q 'export VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER' "${lib}" || missing=1
+    grep -q 'export VLLM_USE_DEEP_GEMM' "${lib}" || missing=1
     grep -q 'export TRTLLM_DG_CACHE_DIR' "${lib}" || missing=1
     if [[ "${missing}" -eq 0 ]]; then
-        printf 'ok   %-34s both exported\n' "trtllm gemm jit"
+        printf 'ok   %-34s all three exported\n' "trtllm gemm jit"
         exit 0
     fi
     printf 'FAIL %-34s not exported to the vLLM child\n' "trtllm gemm jit"
     exit 1
+) || failures=$((failures + 1))
+
+# DeepGEMM is off at one GPU as well, where the rename cannot race. The cost of
+# keeping it on there is not a crash but a confound: the two arms of a
+# one-GPU-versus-four-GPU comparison would run different kernels. Making the
+# value depend on DP_SIZE is the shape that optimisation would take, so it is
+# what this rejects.
+(
+    lib="${SCRIPT_DIR}/common.sh"
+    if grep -v '^[[:space:]]*#' "${lib}" | grep -q 'DP_SIZE.*VLLM_USE_DEEP_GEMM\|VLLM_USE_DEEP_GEMM.*DP_SIZE'; then
+        printf 'FAIL %-34s conditional on the GPU count\n' "deep gemm"
+        exit 1
+    fi
+    printf 'ok   %-34s off for every configuration\n' "deep gemm"
+    exit 0
 ) || failures=$((failures + 1))
 
 # Every claim made so far about whether the GPU is busy has come from a proxy:
